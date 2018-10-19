@@ -1,276 +1,345 @@
 defmodule Ecto.Repo.Queryable do
-  # The module invoked by user defined repos
-  # for query related functionality.
   @moduledoc false
 
-  alias Ecto.Query
   alias Ecto.Queryable
+  alias Ecto.Query
   alias Ecto.Query.Planner
   alias Ecto.Query.SelectExpr
 
   require Ecto.Query
 
-  def transaction(adapter, repo, opts, fun_or_multi) when is_list(opts) do
-    IO.write :stderr, "warning: Ecto.Repo.transaction/2 with opts as first " <>
-                      "argument is deprecated, please switch arguments\n#{Exception.format_stacktrace()}"
-    transaction(adapter, repo, fun_or_multi, opts)
-  end
-
-  def transaction(adapter, repo, fun, opts) when is_function(fun, 0) do
-    adapter.transaction(repo, opts, fun)
-  end
-
-  def transaction(adapter, repo, %Ecto.Multi{} = multi, opts) do
-    wrap   = &adapter.transaction(repo, opts, &1)
-    return = &adapter.rollback(repo, &1)
-
-    case Ecto.Multi.__apply__(multi, repo, wrap, return) do
-      {:ok, values} ->
-        {:ok, values}
-      {:error, {key, error_value, values}} ->
-        {:error, key, error_value, values}
-    end
-  end
-
-  def all(repo, adapter, queryable, opts) when is_list(opts) do
+  def all(name, queryable, opts) when is_list(opts) do
     query =
       queryable
       |> Ecto.Queryable.to_query
-      |> Ecto.Query.Planner.returning(true)
-    execute(:all, repo, adapter, query, opts) |> elem(1)
+      |> Ecto.Query.Planner.ensure_select(true)
+      |> attach_prefix(opts)
+
+    execute(:all, name, query, opts) |> elem(1)
   end
 
-  def get(repo, adapter, queryable, id, opts) do
-    one(repo, adapter, query_for_get(repo, queryable, id), opts)
+  def stream(name, queryable, opts) when is_list(opts) do
+    query =
+      queryable
+      |> Ecto.Queryable.to_query
+      |> Ecto.Query.Planner.ensure_select(true)
+      |> attach_prefix(opts)
+
+    stream(:all, name, query, opts)
   end
 
-  def get!(repo, adapter, queryable, id, opts) do
-    one!(repo, adapter, query_for_get(repo, queryable, id), opts)
+  def get(name, queryable, id, opts) do
+    one(name, query_for_get(queryable, id), opts)
   end
 
-  def get_by(repo, adapter, queryable, clauses, opts) do
-    one(repo, adapter, query_for_get_by(repo, queryable, clauses), opts)
+  def get!(name, queryable, id, opts) do
+    one!(name, query_for_get(queryable, id), opts)
   end
 
-  def get_by!(repo, adapter, queryable, clauses, opts) do
-    one!(repo, adapter, query_for_get_by(repo, queryable, clauses), opts)
+  def get_by(name, queryable, clauses, opts) do
+    one(name, query_for_get_by(queryable, clauses), opts)
   end
 
-  def aggregate(repo, adapter, queryable, aggregate, field, opts) do
-    one!(repo, adapter, query_for_aggregate(queryable, aggregate, field), opts)
+  def get_by!(name, queryable, clauses, opts) do
+    one!(name, query_for_get_by(queryable, clauses), opts)
   end
 
-  def one(repo, adapter, queryable, opts) do
-    case all(repo, adapter, queryable, opts) do
+  def aggregate(name, queryable, aggregate, field, opts) do
+    one!(name, query_for_aggregate(queryable, aggregate, field), opts)
+  end
+
+  def exists?(name, queryable, opts) do
+    queryable = Query.exclude(queryable, :select)
+                |> Query.exclude(:preload)
+                |> Query.exclude(:order_by)
+                |> Query.exclude(:distinct)
+                |> Query.select(1)
+                |> Query.limit(1)
+
+    case all(name, queryable, opts) do
+      [1] -> true
+      [] -> false
+    end
+  end
+
+  def one(name, queryable, opts) do
+    case all(name, queryable, opts) do
       [one] -> one
       []    -> nil
       other -> raise Ecto.MultipleResultsError, queryable: queryable, count: length(other)
     end
   end
 
-  def one!(repo, adapter, queryable, opts) do
-    case all(repo, adapter, queryable, opts) do
+  def one!(name, queryable, opts) do
+    case all(name, queryable, opts) do
       [one] -> one
       []    -> raise Ecto.NoResultsError, queryable: queryable
       other -> raise Ecto.MultipleResultsError, queryable: queryable, count: length(other)
     end
   end
 
-  def update_all(repo, adapter, queryable, [], opts) when is_list(opts) do
-    update_all(repo, adapter, queryable, opts)
+  def update_all(name, queryable, [], opts) when is_list(opts) do
+    update_all(name, queryable, opts)
   end
 
-  def update_all(repo, adapter, queryable, updates, opts) when is_list(opts) do
-    query = Query.from q in queryable, update: ^updates
-    update_all(repo, adapter, query, opts)
+  def update_all(name, queryable, updates, opts) when is_list(opts) do
+    query = Query.from queryable, update: ^updates
+    update_all(name, query, opts)
   end
 
-  defp update_all(repo, adapter, queryable, opts) do
+  defp update_all(name, queryable, opts) do
     query =
       queryable
       |> Ecto.Queryable.to_query
-      |> assert_no_select!(:update_all)
-      |> Ecto.Query.Planner.returning(opts[:returning] || false)
-    execute(:update_all, repo, adapter, query, opts)
+      |> maybe_returning(:update_all, opts)
+      |> attach_prefix(opts)
+
+    execute(:update_all, name, query, opts)
   end
 
-  def delete_all(repo, adapter, queryable, opts) when is_list(opts) do
+  def delete_all(name, queryable, opts) when is_list(opts) do
     query =
       queryable
       |> Ecto.Queryable.to_query
-      |> assert_no_select!(:delete_all)
-      |> Ecto.Query.Planner.returning(opts[:returning] || false)
-    execute(:delete_all, repo, adapter, query, opts)
+      |> maybe_returning(:delete_all, opts)
+      |> attach_prefix(opts)
+
+    execute(:delete_all, name, query, opts)
+  end
+
+  defp maybe_returning(query, kind, opts) do
+    case Keyword.fetch(opts, :returning) do
+      {:ok, value} ->
+        IO.warn ":returning option for #{inspect kind} is deprecated, please specify a select instead"
+        Ecto.Query.Planner.ensure_select(query, value)
+
+      :error ->
+        query
+    end
   end
 
   ## Helpers
 
-  defp assert_no_select!(%{select: nil} = query, _operation) do
-    query
-  end
-  defp assert_no_select!(%{select: _} = query, operation) do
-    raise Ecto.QueryError,
-      query: query,
-      message: "`select` clause is not supported in `#{operation}`, " <>
-               "please pass the :returning option instead"
+  defp attach_prefix(query, opts) do
+    case Keyword.fetch(opts, :prefix) do
+      {:ok, prefix} -> %{query | prefix: prefix}
+      :error -> query
+    end
   end
 
-  defp execute(operation, repo, adapter, query, opts) when is_list(opts) do
-    {meta, prepared, params} = Planner.query(query, operation, repo, adapter)
+  defp execute(operation, name, query, opts) when is_list(opts) do
+    {adapter, %{cache: cache} = adapter_meta} = Ecto.Repo.Registry.lookup(name)
+    {query_meta, prepared, params} = Planner.query(query, operation, cache, adapter, 0)
 
-    case meta do
-      %{fields: nil} ->
-        adapter.execute(repo, meta, prepared, params, nil, opts)
-      %{select: select, fields: fields, prefix: prefix, take: take,
-        sources: sources, assocs: assocs, preloads: preloads} ->
-        preprocess    = preprocess(prefix, sources, adapter)
-        {count, rows} = adapter.execute(repo, meta, prepared, params, preprocess, opts)
-        postprocess   = postprocess(select, fields, take)
-        {_, take_0}   = Map.get(take, 0, {:any, %{}})
+    case query_meta do
+      %{select: nil} ->
+        adapter.execute(adapter_meta, query_meta, prepared, params, opts)
+      %{select: select, sources: sources, preloads: preloads} ->
+        %{
+          preprocess: preprocess,
+          postprocess: postprocess,
+          take: take,
+          assocs: assocs,
+          from: from
+        } = select
+
+        preprocessor = preprocessor(from, preprocess, adapter)
+        {count, rows} = adapter.execute(adapter_meta, query_meta, prepared, params, opts)
+        postprocessor = postprocessor(from, postprocess, take, adapter)
+
         {count,
           rows
-          |> Ecto.Repo.Assoc.query(assocs, sources)
-          |> Ecto.Repo.Preloader.query(repo, preloads, assocs, take_0, postprocess, opts)}
+          |> Ecto.Repo.Assoc.query(assocs, sources, preprocessor)
+          |> Ecto.Repo.Preloader.query(name, preloads, take, postprocessor, opts)}
     end
   end
 
-  defp preprocess(prefix, sources, adapter) do
-    &preprocess(&1, &2, prefix, &3, sources, adapter)
-  end
+  defp stream(operation, name, query, opts) do
+    {adapter, %{cache: cache} = adapter_meta} = Ecto.Repo.Registry.lookup(name)
+    {query_meta, prepared, params} = Planner.query(query, operation, cache, adapter, 0)
 
-  defp preprocess({:&, _, [ix, fields, _]}, value, prefix, context, sources, adapter) do
-    case elem(sources, ix) do
-      {_source, nil} when is_map(value) ->
-        value
-      {_source, nil} when is_list(value) ->
-        load_schemaless(fields, value, %{})
-      {source, schema} ->
-        Ecto.Schema.__load__(schema, prefix, source, context, {fields, value},
-                             &Ecto.Type.adapter_load(adapter, &1, &2))
-      %Ecto.SubQuery{sources: sources, fields: fields, select: select, take: take} ->
-        loaded = load_subquery(fields, value, prefix, context, sources, adapter)
-        postprocess(select, fields, take).(loaded)
+    case query_meta do
+      %{select: nil} ->
+        adapter_meta
+        |> adapter.stream(query_meta, prepared, params, opts)
+        |> Stream.flat_map(fn {_, nil} -> [] end)
+      %{select: select, preloads: preloads} ->
+        %{
+          preprocess: preprocess,
+          postprocess: postprocess,
+          take: take,
+          from: from
+        } = select
+
+        if preloads != [] do
+          raise Ecto.QueryError, query: query, message: "preloads are not supported on streams"
+        end
+
+        preprocessor = preprocessor(from, preprocess, adapter)
+        stream = adapter.stream(adapter_meta, query_meta, prepared, params, opts)
+        postprocessor = postprocessor(from, postprocess, take, adapter)
+
+        stream
+        |> Stream.flat_map(fn {_, rows} -> rows end)
+        |> Stream.map(preprocessor)
+        |> Stream.map(postprocessor)
     end
   end
 
-  defp preprocess({agg, meta, [{{:., _, [{:&, _, [_]}, _]}, _, []}]},
-                  value, _prefix, _context, _sources, adapter) when agg in ~w(avg min max sum)a do
-    type = Keyword.fetch!(meta, :ecto_type)
-    load!(type, value, adapter)
+  defp preprocessor({_, {:source, {source, schema}, prefix, types}}, preprocess, adapter) do
+    struct = Ecto.Schema.Loader.load_struct(schema, prefix, source)
+
+    fn row ->
+      {entry, rest} = Ecto.Schema.Loader.adapter_load(struct, types, row, false, adapter)
+      preprocess(rest, preprocess, entry, adapter)
+    end
+  end
+  defp preprocessor({_, from}, preprocess, adapter) do
+    fn row ->
+      {entry, rest} = process(row, from, nil, adapter)
+      preprocess(rest, preprocess, entry, adapter)
+    end
+  end
+  defp preprocessor(:none, preprocess, adapter) do
+    fn row ->
+      preprocess(row, preprocess, nil, adapter)
+    end
   end
 
-  defp preprocess({{:., _, [{:&, _, [_]}, _]}, meta, []}, value, _prefix, _context, _sources, adapter) do
-    type = Keyword.fetch!(meta, :ecto_type)
-    load!(type, value, adapter)
+  defp preprocess(row, [], _from, _adapter) do
+    row
+  end
+  defp preprocess(row, [source | sources], from, adapter) do
+    {entry, rest} = process(row, source, from, adapter)
+    [entry | preprocess(rest, sources, from, adapter)]
   end
 
-  defp preprocess(%Query.Tagged{tag: tag}, value, _prefix, _context, _sources, adapter) do
-    load!(tag, value, adapter)
+  defp postprocessor({:any, _}, postprocess, _take, adapter) do
+    fn [from | row] ->
+      row |> process(postprocess, from, adapter) |> elem(0)
+    end
+  end
+  defp postprocessor({:map, _}, postprocess, take, adapter) do
+    fn [from | row] ->
+      row |> process(postprocess, to_map(from, take), adapter) |> elem(0)
+    end
+  end
+  defp postprocessor(:none, postprocess, _take, adapter) do
+    fn row -> row |> process(postprocess, nil, adapter) |> elem(0) end
   end
 
-  defp preprocess(_key, value, _prefix, _context, _sources, _adapter) do
-    value
+  defp process(row, {:source, :from}, from, _adapter) do
+    {from, row}
+  end
+  defp process(row, {:source, {source, schema}, prefix, types}, _from, adapter) do
+    struct = Ecto.Schema.Loader.load_struct(schema, prefix, source)
+    Ecto.Schema.Loader.adapter_load(struct, types, row, true, adapter)
+  end
+  defp process(row, {:merge, left, right}, from, adapter) do
+    {left, row} = process(row, left, from, adapter)
+    {right, row} = process(row, right, from, adapter)
+
+    data =
+      case {left, right} do
+        {%{__struct__: s}, %{__struct__: s}} ->
+          Map.merge(left, right)
+        {%{__struct__: _}, %{__struct__: _}} ->
+          raise ArgumentError, "cannot merge structs of different types, got: #{inspect left} and #{inspect right}"
+        {%{__struct__: _}, %{}} ->
+          Enum.reduce(right, left, fn {key, value}, acc -> %{acc | key => value} end)
+        {%{}, %{}} ->
+          Map.merge(left, right)
+        {_, %{}} ->
+          raise ArgumentError, "cannot merge because the left side is not a map, got: #{inspect left}"
+        {%{}, _} ->
+          raise ArgumentError, "cannot merge because the right side is not a map, got: #{inspect right}"
+      end
+
+    {data, row}
+  end
+  defp process(row, {:struct, struct, data, args}, from, adapter) do
+    case process(row, data, from, adapter) do
+      {%{__struct__: ^struct} = data, row} ->
+        process_update(data, args, row, from, adapter)
+      {data, _row} ->
+        raise BadStructError, struct: struct, term: data
+    end
+  end
+  defp process(row, {:struct, struct, args}, from, adapter) do
+    {fields, row} = process_kv(args, row, from, adapter)
+
+    case Map.merge(struct.__struct__(), Map.new(fields)) do
+      %{__meta__: %Ecto.Schema.Metadata{state: state} = metadata} = struct
+      when state != :loaded ->
+        {Map.put(struct, :__meta__, %{metadata | state: :loaded}), row}
+
+      map ->
+        {map, row}
+    end
+  end
+  defp process(row, {:map, data, args}, from, adapter) do
+    {data, row} = process(row, data, from, adapter)
+    process_update(data, args, row, from, adapter)
+  end
+  defp process(row, {:map, args}, from, adapter) do
+    {args, row} = process_kv(args, row, from, adapter)
+    {Map.new(args), row}
+  end
+  defp process(row, {:list, args}, from, adapter) do
+    process_args(args, row, from, adapter)
+  end
+  defp process(row, {:tuple, args}, from, adapter) do
+    {args, row} = process_args(args, row, from, adapter)
+    {List.to_tuple(args), row}
+  end
+  defp process([value | row], {:value, :any}, _from, __adapter) do
+    {value, row}
+  end
+  defp process([value | row], {:value, type}, _from, adapter) do
+    {load!(type, value, nil, nil, adapter), row}
+  end
+  defp process(row, value, _from, _adapter)
+       when is_binary(value) or is_number(value) or is_atom(value) do
+    {value, row}
   end
 
-  defp load_subquery([{:&, [], [_, _, counter]} = field|fields], values, prefix, context, sources, adapter) do
-    {value, values} = Enum.split(values, counter)
-    [preprocess(field, value, prefix, context, sources, adapter) |
-     load_subquery(fields, values, prefix, context, sources, adapter)]
-  end
-  defp load_subquery([field|fields], [value|values], prefix, context, sources, adapter) do
-    [preprocess(field, value, prefix, context, sources, adapter) |
-     load_subquery(fields, values, prefix, context, sources, adapter)]
-  end
-  defp load_subquery([], [], _prefix, _context, _sources, _adapter) do
-    []
+  defp process_update(data, args, row, from, adapter) do
+    {args, row} = process_kv(args, row, from, adapter)
+    data = Enum.reduce(args, data, fn {key, value}, acc -> %{acc | key => value} end)
+    {data, row}
   end
 
-  defp load_schemaless([field|fields], [value|values], acc),
-    do: load_schemaless(fields, values, Map.put(acc, field, value))
-  defp load_schemaless([], [], acc),
-    do: acc
+  defp process_args(args, row, from, adapter) do
+    Enum.map_reduce(args, row, fn arg, row ->
+      process(row, arg, from, adapter)
+    end)
+  end
 
-  defp load!(type, value, adapter) do
+  defp process_kv(kv, row, from, adapter) do
+    Enum.map_reduce(kv, row, fn {key, value}, row ->
+      {key, row} = process(row, key, from, adapter)
+      {value, row} = process(row, value, from, adapter)
+      {{key, value}, row}
+    end)
+  end
+
+  defp load!(type, value, field, struct, adapter) do
     case Ecto.Type.adapter_load(adapter, type, value) do
-      {:ok, value} -> value
-      :error -> raise ArgumentError, "cannot load `#{inspect value}` as type #{inspect type}"
+      {:ok, value} ->
+        value
+      :error ->
+        field = field && " for field #{inspect field}"
+        struct = struct && " in #{inspect struct}"
+        raise ArgumentError, "cannot load `#{inspect value}` as type #{inspect type}#{field}#{struct}"
     end
   end
 
-  defp postprocess(select, fields, take) do
-    # The planner always put the from as the first
-    # entry in the query, avoiding fetching it multiple
-    # times even if it appears multiple times in the query.
-    # So we always need to handle it specially.
-    from? = match?([{:&, _, [0, _, _]}|_], fields)
-    &postprocess(&1, select, take, from?)
+  defp to_map(nil, _fields) do
+    nil
   end
-
-  defp postprocess(row, expr, take, true),
-    do: transform_row(expr, take, hd(row), tl(row)) |> elem(0)
-  defp postprocess(row, expr, take, false),
-    do: transform_row(expr, take, nil, row) |> elem(0)
-
-  defp transform_row({:&, _, [0]}, take, from, values) do
-    {convert_to_tag(from, take[0]), values}
-  end
-
-  defp transform_row({:&, _, [ix]}, take, _from, [value|values]) do
-    {convert_to_tag(value, take[ix]), values}
-  end
-
-  defp transform_row({:{}, _, list}, take, from, values) do
-    {result, values} = transform_row(list, take, from, values)
-    {List.to_tuple(result), values}
-  end
-
-  defp transform_row({left, right}, take, from, values) do
-    {[left, right], values} = transform_row([left, right], take, from, values)
-    {{left, right}, values}
-  end
-
-  defp transform_row({:%{}, _, [{:|, _, [data, pairs]}]}, take, from, values) do
-    {data, values} = transform_row(data, take, from, values)
-    Enum.reduce pairs, {data, values}, fn {k, v}, {data, acc} ->
-      {k, acc} = transform_row(k, take, from, acc)
-      {v, acc} = transform_row(v, take, from, acc)
-      {:maps.update(k, v, data), acc}
-    end
-  end
-
-  defp transform_row({:%{}, _, pairs}, take, from, values) do
-    Enum.reduce pairs, {%{}, values}, fn {k, v}, {map, acc} ->
-      {k, acc} = transform_row(k, take, from, acc)
-      {v, acc} = transform_row(v, take, from, acc)
-      {Map.put(map, k, v), acc}
-    end
-  end
-
-  defp transform_row(list, take, from, values) when is_list(list) do
-    Enum.map_reduce(list, values, &transform_row(&1, take, from, &2))
-  end
-
-  defp transform_row(expr, _take, _from, values)
-       when is_atom(expr) or is_binary(expr) or is_number(expr) do
-    {expr, values}
-  end
-
-  defp transform_row(_, _take, _from, [value|values]) do
-    {value, values}
-  end
-
-  # We only need to worry about the struct -> map scenario.
-  # map -> struct is denied during compilation time.
-  # map -> map, struct -> struct and map/struct -> any are noop.
-  defp convert_to_tag(%{__struct__: _} = value, {:map, fields}),
-    do: to_map(value, fields)
-  defp convert_to_tag(value, _),
-    do: value
-
   defp to_map(value, fields) when is_list(value) do
     Enum.map(value, &to_map(&1, fields))
   end
-
   defp to_map(value, fields) do
     for field <- fields, into: %{} do
       case field do
@@ -280,11 +349,11 @@ defmodule Ecto.Repo.Queryable do
     end
   end
 
-  defp query_for_get(repo, _queryable, nil) do
-    raise ArgumentError, "cannot perform #{inspect repo}.get/2 because the given value is nil"
+  defp query_for_get(_queryable, nil) do
+    raise ArgumentError, "cannot perform Ecto.Repo.get/2 because the given value is nil"
   end
 
-  defp query_for_get(repo, queryable, id) do
+  defp query_for_get(queryable, id) do
     query  = Queryable.to_query(queryable)
     schema = assert_schema!(query)
     case schema.__schema__(:primary_key) do
@@ -292,12 +361,12 @@ defmodule Ecto.Repo.Queryable do
         Query.from(x in query, where: field(x, ^pk) == ^id)
       pks ->
         raise ArgumentError,
-          "#{inspect repo}.get/2 requires the schema #{inspect schema} " <>
+          "Ecto.Repo.get/2 requires the schema #{inspect schema} " <>
           "to have exactly one primary key, got: #{inspect pks}"
     end
   end
 
-  defp query_for_get_by(_repo, queryable, clauses) do
+  defp query_for_get_by(queryable, clauses) do
     Query.where(queryable, [], ^Enum.to_list(clauses))
   end
 
@@ -309,8 +378,10 @@ defmodule Ecto.Repo.Queryable do
       case query do
         %{group_bys: [_|_]} ->
           raise Ecto.QueryError, message: "cannot aggregate on query with group_by", query: query
+
         %{distinct: nil, limit: nil, offset: nil} ->
           %{query | order_bys: []}
+
         _ ->
           select = %SelectExpr{expr: ast, file: __ENV__.file, line: __ENV__.line}
           %{query | select: select}
@@ -326,7 +397,7 @@ defmodule Ecto.Repo.Queryable do
     {{:., [], [{:&, [], [ix]}, field]}, [], []}
   end
 
-  defp assert_schema!(%{from: {_source, schema}}) when schema != nil, do: schema
+  defp assert_schema!(%{from: %{source: {_source, schema}}}) when schema != nil, do: schema
   defp assert_schema!(query) do
     raise Ecto.QueryError,
       query: query,

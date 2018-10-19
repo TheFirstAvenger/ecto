@@ -1,8 +1,23 @@
-defimpl Inspect, for: Ecto.Query do
-  import Inspect.Algebra
-  import Kernel, except: [to_string: 1]
-  alias Ecto.Query.JoinExpr
+import Inspect.Algebra
+import Kernel, except: [to_string: 1]
 
+alias Ecto.Query.{DynamicExpr, JoinExpr, QueryExpr}
+
+defimpl Inspect, for: Ecto.Query.DynamicExpr do
+  def inspect(%DynamicExpr{binding: binding} = dynamic, opts) do
+    {expr, binding, params, _, _} =
+      Ecto.Query.Builder.Dynamic.fully_expand(%Ecto.Query{joins: Enum.drop(binding, 1)}, dynamic)
+
+    names = for {name, _, _} <- binding, do: Atom.to_string(name)
+
+    inspected =
+      Inspect.Ecto.Query.expr(expr, List.to_tuple(names), %{expr: expr, params: params})
+
+    surround_many("dynamic(", [Macro.to_string(binding), inspected], ")", opts, fn str, _ -> str end)
+  end
+end
+
+defimpl Inspect, for: Ecto.Query do
   @doc false
   def inspect(query, opts) do
     list = Enum.map(to_list(query), fn
@@ -33,59 +48,65 @@ defimpl Inspect, for: Ecto.Query do
       |> generate_names
       |> List.to_tuple
 
-    from      = bound_from(query.from, elem(names, 0))
-    joins     = joins(query.joins, names)
-    preloads  = preloads(query.preloads)
-    assocs    = assocs(query.assocs, names)
-
-    wheres    = kw_exprs(:where, query.wheres, names)
+    from = bound_from(query.from, binding(names, 0))
+    joins = joins(query.joins, names)
+    preloads = preloads(query.preloads)
+    assocs = assocs(query.assocs, names)
+    windows = windows(query.windows, names)
+    combinations = combinations(query.combinations)
+ 
+    wheres = bool_exprs(%{and: :where, or: :or_where}, query.wheres, names)
     group_bys = kw_exprs(:group_by, query.group_bys, names)
-    havings   = kw_exprs(:having, query.havings, names)
+    havings = bool_exprs(%{and: :having, or: :or_having}, query.havings, names)
     order_bys = kw_exprs(:order_by, query.order_bys, names)
-    updates   = kw_exprs(:update, query.updates, names)
+    updates = kw_exprs(:update, query.updates, names)
+ 
+    lock = kw_inspect(:lock, query.lock)
+    limit = kw_expr(:limit, query.limit, names)
+    offset = kw_expr(:offset, query.offset, names)
+    select = kw_expr(:select, query.select, names)
+    distinct = kw_expr(:distinct, query.distinct, names)
 
-    lock      = kw_inspect(:lock, query.lock)
-    limit     = kw_expr(:limit, query.limit, names)
-    offset    = kw_expr(:offset, query.offset, names)
-    select    = kw_expr(:select, query.select, names)
-    distinct  = kw_expr(:distinct, query.distinct, names)
-
-    Enum.concat [from, joins, wheres, group_bys, havings, order_bys,
+    Enum.concat [from, joins, wheres, group_bys, havings, windows, combinations, order_bys,
                  limit, offset, lock, distinct, updates, select, preloads, assocs]
   end
 
-  defp bound_from(from, name), do: ["from #{name} in #{unbound_from from}"]
-
-  defp unbound_from(nil),           do: "query"
-  defp unbound_from({source, nil}), do: inspect source
-  defp unbound_from({nil, model}),  do: inspect model
-  defp unbound_from(from = {source, model}) do
-    inspect if(source == model.__schema__(:source), do: model, else: from)
+  defp bound_from(nil, name), do: ["from #{name} in query"]
+  defp bound_from(%{source: source} = from, name) do
+    ["from #{name} in #{inspect_source source}"] ++ kw_as_and_prefix(from)
   end
-  defp unbound_from(%Ecto.SubQuery{query: query}) do
-    "subquery(#{to_string query})"
+
+  defp inspect_source(%Ecto.Query{} = query), do: "^" <> inspect(query)
+  defp inspect_source(%Ecto.SubQuery{query: query}), do: "subquery(#{to_string query})"
+  defp inspect_source({source, nil}), do: inspect source
+  defp inspect_source({nil, schema}), do: inspect schema
+  defp inspect_source({source, schema} = from) do
+    inspect if source == schema.__schema__(:source), do: schema, else: from
   end
 
   defp joins(joins, names) do
     joins
     |> Enum.with_index
-    |> Enum.flat_map(fn {expr, ix} -> join(expr, elem(names, expr.ix || ix + 1), names) end)
+    |> Enum.flat_map(fn {expr, ix} -> join(expr, binding(names, expr.ix || ix + 1), names) end)
   end
 
-  defp join(%JoinExpr{qual: qual, assoc: {ix, right}}, name, names) do
-    string = "#{name} in assoc(#{elem(names, ix)}, #{inspect right})"
-    [{join_qual(qual), string}]
+  defp join(%JoinExpr{qual: qual, assoc: {ix, right}, on: on} = join, name, names) do
+    string = "#{name} in assoc(#{binding(names, ix)}, #{inspect right})"
+    [{join_qual(qual), string}] ++ kw_as_and_prefix(join) ++ maybe_on(on, names)
   end
 
-  defp join(%JoinExpr{qual: qual, source: {:fragment, _, _} = source, on: on} = part, name, names) do
+  defp join(%JoinExpr{qual: qual, source: {:fragment, _, _} = source, on: on} = join = part, name, names) do
     string = "#{name} in #{expr(source, names, part)}"
-    [{join_qual(qual), string}, on: expr(on, names)]
+    [{join_qual(qual), string}] ++ kw_as_and_prefix(join) ++ [on: expr(on, names)]
   end
 
-  defp join(%JoinExpr{qual: qual, source: source, on: on}, name, names) do
-    string = "#{name} in #{unbound_from source}"
-    [{join_qual(qual), string}, on: expr(on, names)]
+  defp join(%JoinExpr{qual: qual, source: source, on: on} = join, name, names) do
+    string = "#{name} in #{inspect_source source}"
+    [{join_qual(qual), string}] ++ kw_as_and_prefix(join) ++ [on: expr(on, names)]
   end
+
+  defp maybe_on(%QueryExpr{expr: true}, _names), do: []
+  defp maybe_on(%QueryExpr{} = on, names), do: [on: expr(on, names)]
 
   defp preloads([]),       do: []
   defp preloads(preloads), do: [preload: inspect(preloads)]
@@ -102,6 +123,24 @@ defimpl Inspect, for: Ecto.Query do
     end
   end
 
+  defp windows(windows, names) do
+    Enum.map(windows, &window(&1, names))
+  end
+
+  defp window({name, %{expr: definition} = part}, names) do
+    {:windows, "[#{name}: " <> expr(definition, names, part) <> "]"}
+  end
+
+  defp combinations(combinations) do
+    Enum.map(combinations, fn {key, val} -> {key, to_string(val)} end)
+  end
+
+  defp bool_exprs(keys, exprs, names) do
+    Enum.map exprs, fn %{expr: expr, op: op} = part ->
+      {Map.fetch!(keys, op), expr(expr, names, part)}
+    end
+  end
+
   defp kw_exprs(key, exprs, names) do
     Enum.map exprs, &{key, expr(&1, names)}
   end
@@ -112,11 +151,16 @@ defimpl Inspect, for: Ecto.Query do
   defp kw_inspect(_key, nil), do: []
   defp kw_inspect(key, val),  do: [{key, inspect(val)}]
 
+  defp kw_as_and_prefix(%{as: as, prefix: prefix}) do
+    kw_inspect(:as, as) ++ kw_inspect(:prefix, prefix)
+  end
+
   defp expr(%{expr: expr} = part, names) do
     expr(expr, names, part)
   end
 
-  defp expr(expr, names, part) do
+  @doc false
+  def expr(expr, names, part) do
     Macro.to_string(expr, &expr_to_string(&1, &2, names, part))
   end
 
@@ -131,14 +175,14 @@ defimpl Inspect, for: Ecto.Query do
       %{^ix => {:any, fields}} when ix == 0 ->
         Kernel.inspect(fields)
       %{^ix => {tag, fields}} ->
-        "#{tag}(" <> elem(names, ix) <> ", " <> Kernel.inspect(fields) <> ")"
+        "#{tag}(" <> binding(names, ix) <> ", " <> Kernel.inspect(fields) <> ")"
       _ ->
-        elem(names, ix)
+        binding(names, ix)
     end
   end
 
   defp expr_to_string({:&, _, [ix]}, _, names, _) do
-    elem(names, ix)
+    binding(names, ix)
   end
 
   # Inject the interpolated value
@@ -150,18 +194,21 @@ defimpl Inspect, for: Ecto.Query do
   end
 
   defp expr_to_string({:^, _, [ix]}, _, _, %{params: params}) do
-    escaped =
-      case Enum.at(params || [], ix) do
-        {value, _type} -> Macro.escape(value)
-        _              -> {:..., [], nil}
-      end
-    Macro.to_string {:^, [], [escaped]}
+    case Enum.at(params || [], ix) do
+      {value, _type} -> "^" <> Kernel.inspect(value, charlists: :as_lists)
+      _              -> "^..."
+    end
   end
 
   # Strip trailing ()
   defp expr_to_string({{:., _, [_, _]}, _, []}, string, _, _) do
     size = byte_size(string)
     :binary.part(string, 0, size - 2)
+  end
+
+  # Types need to be converted back to AST for fields
+  defp expr_to_string({:type, [], [expr, type]}, _string, names, part) do
+    "type(#{expr(expr, names, part)}, #{type |> type_to_expr() |> expr(names, part)})"
   end
 
   # Tagged values
@@ -177,6 +224,16 @@ defimpl Inspect, for: Ecto.Query do
     string
   end
 
+  defp type_to_expr({composite, type}) when is_atom(composite) do
+    {composite, type_to_expr(type)}
+  end
+  defp type_to_expr({part, type}) when is_integer(part) do
+    {{:., [], [{:&, [], [part]}, type]}, [], []}
+  end
+  defp type_to_expr(type) do
+    type
+  end
+
   defp unmerge_fragments([{:raw, s}, {:expr, v}|t], frag, args, names, part) do
     unmerge_fragments(t, frag <> s <> "?", [expr(v, names, part)|args], names, part)
   end
@@ -185,17 +242,24 @@ defimpl Inspect, for: Ecto.Query do
     Enum.join [inspect(frag <> s)|Enum.reverse(args)], ", "
   end
 
-  defp join_qual(:inner), do: :join
-  defp join_qual(:left),  do: :left_join
-  defp join_qual(:right), do: :right_join
-  defp join_qual(:full),  do: :full_join
+  defp join_qual(:inner),         do: :join
+  defp join_qual(:inner_lateral), do: :join_lateral
+  defp join_qual(:left),          do: :left_join
+  defp join_qual(:left_lateral),  do: :left_join_lateral
+  defp join_qual(:right),         do: :right_join
+  defp join_qual(:full),          do: :full_join
+  defp join_qual(:cross),         do: :cross_join
 
-  defp collect_sources(query) do
-    [from_sources(query.from) | join_sources(query.joins)]
+  defp collect_sources(%{from: nil, joins: joins}) do
+    ["query" | join_sources(joins)]
   end
 
-  defp from_sources(%Ecto.SubQuery{query: query}), do: from_sources(query.from)
-  defp from_sources({source, model}), do: model || source
+  defp collect_sources(%{from: %{source: source}, joins: joins}) do
+    [from_sources(source) | join_sources(joins)]
+  end
+
+  defp from_sources(%Ecto.SubQuery{query: query}), do: from_sources(query.from.source)
+  defp from_sources({source, schema}), do: schema || source
   defp from_sources(nil), do: "query"
 
   defp join_sources(joins) do
@@ -204,6 +268,8 @@ defimpl Inspect, for: Ecto.Query do
         assoc
       %JoinExpr{source: {:fragment, _, _}} ->
         "fragment"
+      %JoinExpr{source: %Ecto.Query{from: from}} ->
+        from_sources(from.source)
       %JoinExpr{source: source} ->
         from_sources(source)
     end)
@@ -238,6 +304,14 @@ defimpl Inspect, for: Ecto.Query do
 
   defp generate_names([], acc, _found) do
     acc
+  end
+
+  defp binding(names, pos) do
+    try do
+      elem(names, pos)
+    rescue
+      ArgumentError -> "unknown_binding_#{pos}!"
+    end
   end
 
   defp normalize_source("Elixir." <> _ = source),

@@ -1,11 +1,12 @@
 defmodule Mix.Ecto do
-  # Conveniences for writing Mix.Tasks in Ecto.
-  @moduledoc false
+  @moduledoc """
+  Conveniences for writing Ecto related Mix tasks.
+  """
 
   @doc """
-  Parses the repository option from the given list.
+  Parses the repository option from the given command line args list.
 
-  If no repo option is given, we get one from the environment.
+  If no repo option is given, it is retrieved from the application environment.
   """
   @spec parse_repo([term]) :: [Ecto.Repo.t]
   def parse_repo(args) do
@@ -21,30 +22,29 @@ defmodule Mix.Ecto do
   end
 
   defp parse_repo([], []) do
-    app = Mix.Project.config[:app]
+    apps =
+      if apps_paths = Mix.Project.apps_paths do
+        Map.keys(apps_paths)
+      else
+        [Mix.Project.config[:app]]
+      end
 
-    cond do
-      repos = Application.get_env(app, :ecto_repos) ->
-        repos
-
-      # TODO: Remove function exported check once we depend on 1.3 only
-      not function_exported?(Mix.Project, :deps_paths, 0) or
-          Map.has_key?(Mix.Project.deps_paths, :ecto) ->
+    apps
+    |> Enum.flat_map(&Application.get_env(&1, :ecto_repos, []))
+    |> Enum.uniq()
+    |> case do
+      [] ->
         Mix.shell.error """
-        warning: could not find repositories for application #{inspect app}.
+        warning: could not find Ecto repos in any of the apps: #{inspect apps}.
 
         You can avoid this warning by passing the -r flag or by setting the
-        repositories managed by this application in your config/config.exs:
+        repositories managed by those applications in your config/config.exs:
 
-            config #{inspect app}, ecto_repos: [...]
-
-        The configuration may be an empty list if it does not define any repo.
+            config #{inspect hd(apps)}, ecto_repos: [...]
         """
         []
-
-      true ->
-        []
-
+      repos ->
+        repos
     end
   end
 
@@ -53,9 +53,9 @@ defmodule Mix.Ecto do
   end
 
   @doc """
-  Ensures the given module is a repository.
+  Ensures the given module is an Ecto.Repo.
   """
-  @spec ensure_repo(module, list) :: Ecto.Repo.t | no_return
+  @spec ensure_repo(module, list) :: Ecto.Repo.t
   def ensure_repo(repo, args) do
     Mix.Task.run "loadpaths", args
 
@@ -78,76 +78,13 @@ defmodule Mix.Ecto do
   end
 
   @doc """
-  Ensures the given repository is started and running.
-  """
-  @spec ensure_started(Ecto.Repo.t, Keyword.t) :: Ecto.Repo.t | no_return
-  def ensure_started(repo, opts) do
-    {:ok, _} = Application.ensure_all_started(:ecto)
-    {:ok, _} = Application.ensure_all_started(repo.__adapter__.application)
-
-    pool_size = Keyword.get(opts, :pool_size, 1)
-    case repo.start_link(pool_size: pool_size) do
-      {:ok, pid} ->
-        {:ok, pid}
-      {:error, {:already_started, _pid}} ->
-        {:ok, nil}
-      {:error, error} ->
-        Mix.raise "Could not start repo #{inspect repo}, error: #{inspect error}"
-    end
-  end
-
-  @doc """
-  Ensures the given repository's migrations path exists on the filesystem.
-  """
-  @spec ensure_migrations_path(Ecto.Repo.t) :: Ecto.Repo.t | no_return
-  def ensure_migrations_path(repo) do
-    with false <- Mix.Project.umbrella?,
-         path = Path.relative_to(migrations_path(repo), Mix.Project.app_path),
-         false <- File.dir?(path),
-         do: Mix.raise "Could not find migrations directory #{inspect path} for repo #{inspect repo}"
-    repo
-  end
-
-  @doc """
-  Restarts the app if there was any migration command.
-  """
-  def restart_app_if_migrated(_repo, []), do: :ok
-  def restart_app_if_migrated(repo, [_|_]) do
-    # Silence the logger to avoid application down messages.
-    Logger.remove_backend(:console)
-    app = repo.__adapter__.application
-    Application.stop(app)
-    Application.ensure_all_started(app)
-  after
-    Logger.add_backend(:console, flush: true)
-  end
-
-  @doc """
-  Gets the migrations path from a repository.
-  """
-  @spec migrations_path(Ecto.Repo.t) :: String.t
-  def migrations_path(repo) do
-    Path.join(repo_priv(repo), "migrations")
-  end
-
-  @doc """
-  Returns the private repository path.
-  """
-  def repo_priv(repo) do
-    config = repo.config()
-
-    Application.app_dir(Keyword.fetch!(config, :otp_app),
-      config[:priv] || "priv/#{repo |> Module.split |> List.last |> Macro.underscore}")
-  end
-
-  @doc """
   Asks if the user wants to open a file based on ECTO_EDITOR.
   """
   @spec open?(binary) :: boolean
   def open?(file) do
     editor = System.get_env("ECTO_EDITOR") || ""
     if editor != "" do
-      :os.cmd(to_char_list(editor <> " " <> inspect(file)))
+      :os.cmd(to_charlist(editor <> " " <> inspect(file)))
       true
     else
       false
@@ -156,6 +93,7 @@ defmodule Mix.Ecto do
 
   @doc """
   Gets a path relative to the application path.
+
   Raises on umbrella application.
   """
   def no_umbrella!(task) do

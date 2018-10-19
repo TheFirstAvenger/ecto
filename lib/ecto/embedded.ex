@@ -8,11 +8,13 @@ defmodule Ecto.Embedded do
                        field: atom,
                        owner: atom,
                        on_cast: nil | fun,
-                       related: atom}
+                       related: atom,
+                       unique: boolean}
 
   @behaviour Ecto.Changeset.Relation
   @on_replace_opts [:raise, :mark_as_invalid, :delete]
-  defstruct [:cardinality, :field, :owner, :related, :on_cast, on_replace: :raise]
+  @embeds_one_on_replace_opts @on_replace_opts ++ [:update]
+  defstruct [:cardinality, :field, :owner, :related, :on_cast, on_replace: :raise, unique: true]
 
   @doc """
   Builds the embedded struct.
@@ -26,8 +28,10 @@ defmodule Ecto.Embedded do
   """
   def struct(module, name, opts) do
     opts = Keyword.put_new(opts, :on_replace, :raise)
+    cardinality = Keyword.fetch!(opts, :cardinality)
+    on_replace_opts = if cardinality == :one, do: @embeds_one_on_replace_opts, else: @on_replace_opts
 
-    unless opts[:on_replace] in @on_replace_opts do
+    unless opts[:on_replace] in on_replace_opts do
       raise ArgumentError, "invalid `:on_replace` option for #{inspect name}. " <>
         "The only valid options are: " <>
         Enum.map_join(@on_replace_opts, ", ", &"`#{inspect &1}`")
@@ -43,36 +47,36 @@ defmodule Ecto.Embedded do
   by actual structs so it can be dumped by adapters and
   loaded into the schema struct afterwards.
   """
-  def prepare(changeset, adapter, repo_action) do
-    %{changes: changes, data: %{__struct__: schema}} = changeset
-    prepare(changeset, Map.take(changes, schema.__schema__(:embeds)), adapter, repo_action)
+  def prepare(changeset, embeds, adapter, repo_action) do
+    %{changes: changes, types: types, repo: repo} = changeset
+    prepare(Map.take(changes, embeds), types, adapter, repo, repo_action)
   end
 
-  defp prepare(changeset, embeds, _adapter, _repo_action) when embeds == %{} do
-    changeset
+  defp prepare(embeds, _types, _adapter, _repo, _repo_action) when embeds == %{} do
+    embeds
   end
 
-  defp prepare(%{types: types} = changeset, embeds, adapter, repo_action) do
-    update_in changeset.changes, fn changes ->
-      Enum.reduce embeds, changes, fn {name, changeset}, acc ->
-        {:embed, embed} = Map.get(types, name)
-        Map.put(acc, name, prepare_each(embed, changeset, adapter, repo_action))
-      end
+  defp prepare(embeds, types, adapter, repo, repo_action) do
+    Enum.reduce embeds, embeds, fn {name, changeset_or_changesets}, acc ->
+      {:embed, embed} = Map.get(types, name)
+      Map.put(acc, name, prepare_each(embed, changeset_or_changesets, adapter, repo, repo_action))
     end
   end
 
-  defp prepare_each(%{cardinality: :one}, nil, _adapter, _repo_action) do
+  defp prepare_each(%{cardinality: :one}, nil, _adapter, _repo, _repo_action) do
     nil
   end
 
-  defp prepare_each(%{cardinality: :one} = embed, changeset, adapter, repo_action) do
+  defp prepare_each(%{cardinality: :one} = embed, changeset, adapter, repo, repo_action) do
     action = check_action!(changeset.action, repo_action, embed)
+    changeset = run_prepare(changeset, repo)
     to_struct(changeset, action, embed, adapter)
   end
 
-  defp prepare_each(%{cardinality: :many} = embed, changesets, adapter, repo_action) do
+  defp prepare_each(%{cardinality: :many} = embed, changesets, adapter, repo, repo_action) do
     for changeset <- changesets,
         action = check_action!(changeset.action, repo_action, embed),
+        changeset = run_prepare(changeset, repo),
         prepared = to_struct(changeset, action, embed, adapter),
         do: prepared
   end
@@ -89,9 +93,9 @@ defmodule Ecto.Embedded do
                          "got: #{inspect actual}"
   end
 
-  defp to_struct(%Changeset{changes: changes, data: model}, :update,
+  defp to_struct(%Changeset{changes: changes, data: schema}, :update,
                  _embed, _adapter) when changes == %{} do
-    model
+    schema
   end
 
   defp to_struct(%Changeset{}, :delete, _embed, _adapter) do
@@ -99,12 +103,27 @@ defmodule Ecto.Embedded do
   end
 
   defp to_struct(%Changeset{} = changeset, action, %{related: schema}, adapter) do
-    %{data: struct, changes: changes} = prepare(changeset, adapter, action)
+    %{data: struct, changes: changes} = changeset
+    embeds = prepare(changeset, schema.__schema__(:embeds), adapter, action)
 
     changes
+    |> Map.merge(embeds)
     |> autogenerate_id(struct, action, schema, adapter)
     |> autogenerate(action, schema)
     |> apply_embeds(struct)
+  end
+
+  defp run_prepare(changeset, repo) do
+    changeset = %{changeset | repo: repo}
+
+    Enum.reduce(Enum.reverse(changeset.prepare), changeset, fn fun, acc ->
+      case fun.(acc) do
+        %Ecto.Changeset{} = acc -> acc
+        other ->
+          raise "expected function #{inspect fun} given to Ecto.Changeset.prepare_changes/2 " <>
+                "to return an Ecto.Changeset, got: `#{inspect other}`"
+      end
+    end)
   end
 
   defp apply_embeds(changes, struct) do
@@ -121,16 +140,14 @@ defmodule Ecto.Embedded do
 
   defp autogenerate_id(changes, _struct, :insert, schema, adapter) do
     case schema.__schema__(:autogenerate_id) do
-      {key, :binary_id} ->
-        case Map.fetch(changes, key) do
-          {:ok, _} ->
-            changes
-          :error ->
-            Map.put(changes, key, adapter.autogenerate(:embed_id))
-        end
-      other ->
-        raise ArgumentError, "embedded schema `#{inspect schema}` must have " <>
-          "`:binary_id` primary key with `autogenerate: true`, got: #{inspect other}"
+      {key, _source, :binary_id} ->
+        Map.put_new_lazy(changes, key, fn -> adapter.autogenerate(:embed_id) end)
+      {_key, :id} ->
+        raise ArgumentError, "embedded schema `#{inspect schema}` cannot autogenerate `:id` primary keys, " <>
+                             "those are typically used for auto-incrementing constraints. " <>
+                             "Maybe you meant to use `:binary_id` instead?"
+      nil ->
+        changes
     end
   end
 
@@ -142,21 +159,24 @@ defmodule Ecto.Embedded do
   end
 
   defp autogenerate(changes, action, schema) do
-    Enum.reduce schema.__schema__(action_to_auto(action)), changes, fn
-      {k, {mod, fun, args}}, acc ->
-        case Map.fetch(acc, k) do
-          {:ok, _} -> acc
-          :error   -> Map.put(acc, k, apply(mod, fun, args))
-        end
-    end
+    autogen_fields = action |> action_to_auto() |> schema.__schema__()
+
+    Enum.reduce(autogen_fields, changes, fn {fields, {mod, fun, args}}, acc ->
+      case Enum.reject(fields, &Map.has_key?(changes, &1)) do
+        [] ->
+          acc
+
+        fields ->
+          generated = apply(mod, fun, args)
+          Enum.reduce(fields, acc, &Map.put(&2, &1, generated))
+      end
+    end)
   end
 
   defp action_to_auto(:insert), do: :autogenerate
   defp action_to_auto(:update), do: :autoupdate
 
-  @doc """
-  Callback invoked to build relations.
-  """
+  @impl true
   def build(%Embedded{related: related}) do
     related.__struct__
   end

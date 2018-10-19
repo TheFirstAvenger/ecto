@@ -1,176 +1,187 @@
-# Changelog for v2.0
-
-This is a new major release of Ecto that removes previously deprecated features and introduces a series of improvements and features based on [`db_connection`](https://github.com/fishcakez/db_connection).
-
-Ecto 2.0 requires Elixir 1.2+.
+# Changelog for v3.0
 
 ## Highlights
 
-### Revamped changesets
+This is a new major release for Ecto v3.0. Despite the major version change, we have kept the number of user-facing breaking changes to a minimum, mostly around three areas:
 
-Due to feedback, we have made three important changes to changesets:
+  * Split the Ecto repository apart
+  * Remove the previously deprecated Ecto datetime types in favor of the Calendar types that ship as part of Elixir
+  * Update to the latest JSON handling best practices
 
-  1. `changeset.model` has been renamed to `changeset.data` (we no longer have "models" in Ecto)
-  2. Passing required and optional fields to `cast/4` is deprecated in favor of `cast/3` and `validate_required/3`
-  3. The `:empty` atom in `cast(source, :empty, required, optional)` has been deprecated, please use an empty map or `:invalid` instead
+Besides those changes, there are many exciting new features. We will explore all of those changes and more below.
 
-To summarize those changes, instead of:
+### Split the Ecto into `ecto` and `ecto_sql`
 
-    def changeset(user, params \\ :empty) do
-      user
-      |> cast(params, [:name], [:age])
-    end
+Ecto is broken in two repositories: `ecto` and `ecto_sql`. Since Ecto v2.0, an increased number of developers and teams have been using Ecto for data mapping and validation, without a need for a database. However, adding Ecto to your application would still bring a lot of the SQL baggage, such as adapters, sandboxes and migrations. In Ecto 3.0, we have moved all of the SQL adapters to a separate repository and Ecto now mostly focuses on the four Ecto building blocks: schemas, changesets, queries and repos.
 
-One should write:
+If you are using Ecto with a SQL database, migrating to Ecto 3.0 is very striaght-forward. Instead of:
 
-    def changeset(user, params \\ %{}) do
-      user
-      |> cast(params, [:name, :age])
-      |> validate_required([:name])
-    end
+    {:ecto, "~> 2.2"}
 
-### Subqueries
+You should now list:
 
-Ecto v2.0 introduces `Ecto.Query.subquery/1` that will convert any query into a subquery to be used either as part of a `from` or a `join`. For example, if you want to calculate the average number of visits per posts, you can write:
+    {:ecto_sql, "~> 3.0"}
 
-    query = from p in Post, select: avg(p.visits)
-    TestRepo.all(query) #=> [#Decimal<1743>]
+And that's it!
 
-However, if you want to calculate the average only across the top 10 most visited, you need subqueries:
+### Calendar types
 
-    query = from p in Post, select: [:visits], order_by: [desc: :visits], limit: 10
-    TestRepo.all(from p in subquery(query), select: avg(p.visits)) #=> [#Decimal<4682>]
+`Ecto.Date`, `Ecto.Time` and `Ecto.DateTime` no longer exist. Instead developers should use `Date`, `Time`, `DateTime` and `NaiveDateTime` that ship as part of Elixir and are the preferred types since Ecto 2.1. Odds that you are already using the new types and not the deprecated ones.
 
-Or alternatively, for the particular example where you are calculating aggregates, use the new `Repo.aggregate` function that handles those concerns automatically for you:
+Note that database adapters have also been standardized to work with Elixir types and they no longer return tuples when developers perform raw queries or use `Ecto.Query` fragments. For example, in Ecto 2.x:
 
-    # Average across all
-    TestRepo.aggregate(Post, :avg, :visits) #=> #Decimal<1743>
+    iex> Repo.one from u in User, select: fragment("?", u.created_at), limit: 1
+    {{2018, 10, 8}, {15, 15, 42, 501011}}
 
-    # Average across top 10
-    query = from Post, order_by: [desc: :visits], limit: 10
-    TestRepo.aggregate(query, :avg, :visits) #=> #Decimal<4682>
+And now in Ecto 3.0:
 
-### Concurrent transactional tests
+    iex> Repo.one from u in User, select: fragment("?", u.created_at), limit: 1
+    ~N[2018-10-08 15:15:42.501011]
 
-Ecto has reimplemented the `Ecto.Adapters.SQL.Sandbox` pool used for testing to use an ownership mechanism. This allows tests to safely run concurrently even when depending on the database. To use, declare sandbox as your pool in your repository configuration, as before:
+To uniformly support microseconds across all databases, the types `:time`, `:naive_datetime`, `:utc_datetime` will now discard any microseconds information. Ecto v3.0 introduces the types `:time_usec`, `:naive_datetime_usec` and `:utc_datetime_usec` as an alternative for those interested in keeping microseconds. If you want to keep microseconds in your migrations and schemas, you need to configure your repository:
 
-    pool: Ecto.Adapters.SQL.Sandbox
+    config :my_app, MyApp.Repo,
+      migration_timestamps: [type: :naive_datetime_usec]
 
-Now at the end of your `test_helper.exs`, set the sandbox mode to `:manual` in order to disable the automatic checkout of connections:
+And then in your schema:
 
-    Ecto.Adapters.SQL.Sandbox.mode(TestRepo, :manual)
+    @timestamps_opts [type: :naive_datetime_usec]
 
-And now checkout the connection in the `setup` block of every test case that needs the database:
+### JSON handling
 
-    setup do
-      :ok = Ecto.Adapters.SQL.Sandbox.checkout(TestRepo)
-    end
+Ecto v3.0 moved the management of the JSON library to adapters. All adapters should default to [`Jason`](https://github.com/michalmuskala/jason).
 
-The previous sandbox API, which used `begin_test_transaction` and `restart_test_transaction`, is no longer supported.
+The following configuration will emit a warning:
 
-### Insert all
+    config :ecto, :json_library, CustomJSONLib
 
-Ecto now allows developers to insert multiple entries at once via `Ecto.Repo.insert_all/3`:
+And should be rewritten as:
 
-    Ecto.Repo.insert_all Post, [%{title: "foo"}, %{title: "bar"}]
+    # For Postgres
+    config :postgrex, :json_library, CustomJSONLib
 
-Similar to `update_all/3`, `insert_all/3` is meant to be closer to the datastore and it won't automatically handle autogenerated fields like `inserted_at` or `updated_at` timestamps. `insert_all/3` also adds to Ecto the ability to introduce entries to the database without an underlying `Ecto.Schema` by simply giving a table name:
+    # For MySQL
+    config :mariaex, :json_library, CustomJSONLib
 
-    Ecto.Repo.insert_all "some_table", [%{hello: "foo"}, %{hello: "bar"}]
+If you want to rollback to Poison, you need to configure your adapter accordingly:
 
-### Many to many
+    # For Postgres
+    config :postgrex, :json_library, Poison
 
-Ecto 2.0 supports `many_to_many` associations:
+    # For MySQL
+    config :mariaex, :json_library, Poison
 
-    defmodule Post do
-      use Ecto.Schema
-      schema "posts" do
-        many_to_many :tags, Tag, join_through: "posts_tags"
-      end
-    end
+We recommend everyone to migrate to Jason. Built-in support for Poison will be removed in future Ecto 3.x releases.
 
-The `join_through` option can be a string, representing a table that will have both `post_id` and `tag_id` columns, or a regular schema, like `PostTag`, which would also handle primary keys and autogenerate fields. This is an improvement over `has_many :through` as `has_many :through` relationships are read-only, while `many_to_many` supports also inserting, updating and deleting associated entries through changeset, as we will see next.
+### Named bindings
 
-### Improved association support
+One of the exciting additions in Ecto v3.0 is the addition of named bindings to make the query composition even more flexible:
 
-Ecto now supports `belongs_to` and `many_to_many` associations to be cast or changed via changesets, beyond `has_one`, `has_many` and embeds. Not only that, Ecto supports associations and embeds to be defined directly from the struct on insertion. For example, one can call:
+    query = Post
 
-    Repo.insert! %Permalink{
-      url: "//root",
-      post: %Post{
-        title: "A permalink belongs to a post which we are inserting",
-        comments: [
-          %Comment{text: "child 1"},
-          %Comment{text: "child 2"},
-        ]
-      }
-    }
+    # Filter by the join
+    query = from p in query,
+              join: c in Comment, as: :comments, where: c.post_id == p.id
 
-This allows developers to easily insert a tree of structs into the database, be it when seeding data for production or during tests.
+    # Extend the query
+    query = from [p, comments: c] in query,
+              select: {p.title, c.body}
 
-Finally, Ecto now allows putting existing records in changesets, and the proper changes will be reflected in both structs and the database. For example, you may retrieve the permalink above and associate it to another existing post:
+`Ecto.Query` got many other exciting features. Such as pairwise comparisons, as in `where: {p.foo, p.bar} > {^foo, ^bar}`, built-in support for `coalesce` and arithmetic operators, the ability to filter aggregators, as in `select: filter(count(p.id), p.public == true)`, table specific hints in databases like MySQL and MSSQL, unions, intersections, windows, and many more.
 
-    permalink
-    |> Ecto.Changeset.change
-    |> Ecto.Changeset.put_assoc(:post, existing_post)
-    |> Repo.update!
+### Locked migrations
 
-## Backwards incompatible changes
+Running migrations will now lock the migrations table, allowing you to concurrently run migrations in a cluster without worrying that two servers will race each other or without running migrations twice.
 
-  * [Changeset] `changeset.model` has been renamed to `changeset.data`
-  * [Changeset] `changeset.optional` has been removed
-  * [Changeset] `changeset.errors` now always returns tuple `{String.t, Keyword.t}` in its values
-  * [LogEntry] Overhaul log entry and store times in :native units
-  * [Repo] `Ecto.StaleModelError` has been renamed to `Ecto.StaleEntryError`
-  * [Repo] Poolboy now expects `:pool_overflow` option instead of `:max_overflow`
-  * [Repo] `Repo.insert/2` will now send only non-nil fields from the struct to the storage (in previous versions, all fields from the struct were sent to the database)
-  * [Repo] `Ecto.Pools.Poolboy` and `Ecto.Pools.SojournBroker` have been removed in favor of `DBConnection.Poolboy` and `DBConnection.Sojourn`
-  * [Repo] `:timeout` in `Repo.transaction` now affects the whole transaction block and not only the particular transaction queries
-  * [Repo] Overriding `Repo.log/1` is no longer supported. Instead provide custom loggers configuration via `:loggers`. The default is: `[Ecto.LogEntry]`
-  * [Schema] Array fields no longer default to an empty list `[]`. Previous behaviour can be achieved by passing `default: []` to the field definition
-  * [SQL] `Ecto.Adapters.SQL.begin_test_transaction`, `Ecto.Adapters.SQL.restart_test_transaction` and `Ecto.Adapters.SQL.rollback_test_transaction` have been removed in favor of the new ownership-based `Ecto.Adapters.SQL.Sandbox`
+## v3.0.0-rc.1 (2018-10-15)
 
-## Deprecations
+### Enhancements
 
-  * [Changeset] Deprecate `:empty` in `Ecto.Changeset.cast`
-  * [Changeset] Deprecate `Ecto.Changeset.cast/4` in favor of `Ecto.Changeset.cast/3`
-  * [Repo] `Repo.after_connect/1` is deprecated, please pass the `:after_connect` repository option instead
+  * [Ecto.Adapters.MySQL] Add ability to specify cli_protocol for `ecto.create` and `ecto.drop` commands
+  * [Ecto.Adapters.PostgreSQL] Add ability to specify maintenance database name for PostgreSQL adapter for `ecto.create` and `ecto.drop` commands
+  * [Ecto.Changeset] Store constraint name in error metadata for constraints
+  * [Ecto.Changeset] Add `validations/1` and `constraints/1` instead of allowing direct access on the struct fields
+  * [Ecto.Changeset] Add `:force_update` option when casting relations, to force an update even if there are no changes
+  * [Ecto.Migration] Migrations now lock the migrations table in order to avoid concurrent migrations in a cluster. The type of lock can be configured via the `:migration_lock` repository configuration and defaults to "FOR UPDATE" or disabled if set to nil
+  * [Ecto.Migration] Add `:migration_default_prefix` repository configuration
+  * [Ecto.Migration] Add reversible version of `remove/2` subcommand
+  * [Ecto.Migration] Add support for non-empty arrays as defaults in migrations
+  * [Ecto.Migration] Add support for logging notices/alerts/warnings when running migrations (only supported by Postgres currently)
+  * [Ecto.Migrator] Warn when migrating and there is a higher version already migrated in the database
+  * [Ecto.Multi] Add support for anonymous functions in `insert/4`, `update/4`, `insert_or_update/4`, and `delete/4`
+  * [Ecto.Query] Support tuples in `where` and `having`, allowing queries such as `where: {p.foo, p.bar} > {^foo, ^bar}`
+  * [Ecto.Query] Support arithmetic operators in queries as a thin layer around the DB functionality
+  * [Ecto.Query] Allow joins in queries to be named via `:as` and allow named bindings
+  * [Ecto.Query] Support excluding specific join types in `exclude/2`
+  * [Ecto.Query] Allow virtual field update in subqueries
+  * [Ecto.Query] Support `coalesce/2` in queries, such as `select: coalesce(p.title, p.old_title)`
+  * [Ecto.Query] Support `filter/2` in queries, such as `select: filter(count(p.id), p.public == true)`
+  * [Ecto.Query] The `:prefix` and `:hints` options are now supported on both `from` and `join` expressions
+  * [Ecto.Query] Support `:asc_nulls_last`, `:asc_nulls_first`, `:desc_nulls_last`, and `:desc_nulls_first` in `order_by`
+  * [Ecto.Query] Allow variables (sources) to be given in queries, for example, useful for invoking functins, such as `fragment("some_function(?)", p)`
+  * [Ecto.Query] Add support for `union`, `union_all`, `intersection`, `intersection_all`, `except` and `except_all`
+  * [Ecto.Query] Add support for `windows` and `over`
+  * [Ecto.Query] Raise when comparing a string with a charlist during planning
+  * [Ecto.Repo] Only start transactions if an association or embed has changed, this reduces the overhead during repository operations
+  * [Ecto.Repo] Support `:replace_all_except_primary_key` as `:on_conflict` strategy
+  * [Ecto.Repo] Support `{:replace, fields}` as `:on_conflict` strategy
+  * [Ecto.Repo] Support `:unsafe_fragment` as `:conflict_target`
+  * [Ecto.Repo] Support `select` in queries given to `update_all` and `delete_all`
+  * [Ecto.Repo] Add `Repo.exists?/2`
+  * [Ecto.Repo] Add `Repo.checkout/2` - useful when performing multiple operations in short-time to interval, allowing the pool to be bypassed
+  * [Ecto.Repo] Add `:stale_error_field` to `Repo.insert/update/delete` that converts `Ecto.StaleEntryError` into a changeset error. The message can also be set with `:stale_error_message`
+  * [Ecto.Repo] Preloading now only sorts results by the relationship key instead of sorting by the whole struct
+  * [Ecto.Schema] Allow `:where` option to be given to `has_many`/`has_one`/`belongs_to`/`many_to_many`. `many_to_many` also supports `:join_through_where`
 
-## Enhancements
+### Bug fixes
 
-  * [Adapter] Ensure adapters work on native types, guaranteeing adapters compose better with custom types
-  * [Adapter] Support prepared queries in adapters
-  * [Adapter] Add support for loading and dumping structures
-  * [DateTime] Ensure the given date and datetimes are valid
-  * [Migration] Add support for partial indexes by specifying the `:where` option when on `Ecto.Migration.index/2`
-  * [Migration] Allow the migration table name to be configured in the repository via `:migration_source`
-  * [Migration] Support `:on_update` for `Ecto.Migrate.references`
-  * [Migration] Use pool of 1 connection for `mix ecto.migrate/rollback`
-  * [Mix] Automatically reenable migration and repository management tasks after execution
-  * [Postgres] Add migration and changeset support for PostgreSQL exclusion constraints. Example: `create constraint(:sizes, :cannot_overlap, exclude: ~s|gist (int4range("min", "max", '[]') WITH &&)|)` and `exclusion_constraint(changeset, :sizes, name: :cannot_overlap, message: "must not overlap")`
-  * [Postgres] Add migration and changeset support for PostgreSQL check constraints. Example: `create constraint(:products, "positive_price", check: "price > 0")` and `check_constraint(changeset, :price, name: :positive_price, message: "must be greater than zero")`
-  * [Query] Allow the `:on` field to be specified with association joins
-  * [Query] Support expressions in map keys in `select` in queries. Example: `from p in Post, select: %{p.title => p.visitors}`
-  * [Query] Support map update syntax. Example: `from p in Post, select: %{p | title: "fixed"}`
-  * [Query] Allow struct fields to be selected with `struct/2` and map fields with `map/2`, including support for dynamic fields
-  * [Query] Add `first/2` and `last/2`
-  * [Repo] Add `Repo.aggregate/4` for easy aggregations
-  * [Repo] Allow custom `select` field in preload queries
-  * [Repo] Support the `:force` option in preloads
-  * [Repo] Perform preloads in parallel by default
-  * [Repo] Add `Repo.in_transaction?` to know if the current process is in a transaction
-  * [Repo] Support `:returning` option in `insert_all`, `update_all` and `delete_all`
-  * [Schema] Allow `@schema_prefix` to be configured per schema. It is used for new structs as well as queries where the given schema is used as `from`
-  * [Schema] Support composite primary keys
+  * [Ecto.Inspect] Do not fail when inspecting query expressions which have a number of bindings more than bindings available
+  * [Ecto.Migration] Keep double underscores on autogenerated index names to be consistent with changesets
+  * [Ecto.Query] Fix `Ecto.Query.API.map/2` for single nil column with join
+  * [Ecto.Migration] Ensure `create_if_not_exists` is properly reversible
+  * [Ecto.Repo] Allow many_to_many associations to be preloaded via a function (before the behaviour was erratic)
+  * [Ecto.Schema] Make autogen ID loading work with custom type
+  * [Ecto.Schema] Make `updated_at` have the same value as `inserted_at`
+  * [Ecto.Schema] Ensure all fields are replaced with `on_conflict: :replace_all/:replace_all_except_primary_key` and not only the fields sent as changes
+  * [Ecto.Type] Return `:error` when casting NaN or infinite decimals
+  * [mix ecto.migrate] Properly run migrations after ECTO_EDITOR changes
+  * [mix ecto.migrations] List migrated versions even if the migration file is deleted
+  * [mix ecto.load] The task now fails on SQL errors on Postgres
 
-## Bug fixes
+### Deprecations
 
-  * [Changeset] The `:required` option on `cast_assoc` and `cast_embed` will now tag `has_many` and `embeds_many` relationships as missing if they contain an empty list
-  * [DateTime] Fix Date/DateTime serialization for years above 9999
-  * [Postgres] Switch pg storage management away from `psql` and use direct database connections, solving many issues like locale and database connection
-  * [Repo] Ensure nested preload works even if intermediate associations were already loaded
-  * [Repo] Do not attempt to execute insert/update/delete statement for associations if a previous operation failed due to a constraint error
+Although Ecto 3.0 is a major bump version, the functionality below emits deprecation warnings to ease the migration process. The functionality below will be removed in future Ecto 3.1+ releases.
+
+  * [Ecto.Changeset] Passing a list of binaries to `cast/3` is deprecated, please pass a list of atoms instead
+  * [Ecto.Multi] `Ecto.Multi.run/3` now receives the repo in which the transaction is executing as the first argument to functions, and the changes so far as the second argument
+  * [Ecto.Query] `join/5` now expects `on: expr` as last argument instead of simply `expr`. This was done in order to properly support the `:as`, `:hints` and `:prefix` options
+  * [Ecto.Repo] The `:returning` option for `update_all` and `delete_all` has been deprecated as those statements now support `select` clauses
+  * [Ecto.Repo] Passing `:adapter` via config is deprecated in favor of passing it on `use Ecto.Repo`
+  * [Ecto.Repo] The `:loggers` configuration is deprecated in favor of "Telemetry Events"
+
+### Backwards incompatible changes
+
+  * [Ecto.DateTime] `Ecto.Date`, `Ecto.Time` and `Ecto.DateTime` were previously deprecated and have now been removed
+  * [Ecto.DataType] `Ecto.DataType` protocol has been removed
+  * [Ecto.Multi] `Ecto.Multi.run/5` now receives the repo in which the transaction is executing as the first argument to functions, and the changes so far as the second argument
+  * [Ecto.Query] A `join` no longer wraps `fragment` in parentheses. In some cases, such as common table expressions, you will have to explicitly wrap the fragment in parens.
+  * [Ecto.Schema] `:time`, `:naive_datetime` and `:utc_datetime` no longer keep microseconds information. If you want to keep microseconds, use `:time_usec`, `:naive_datetime_usec`, `:utc_datetime_usec`
+  * [Ecto.Schema] The `@schema_prefix` option now only affects the `from`/`join` of where the schema is used and no longer the whole query
+
+### Adapter changes
+
+  * [Ecto.Adapter] Split `Ecto.Adapter` into `Ecto.Adapter.Queryable` and `Ecto.Adapter.Schema` to provide more granular repository APIs
+  * [Ecto.Adapter] The `:sources` field in `query_meta` now contains three elements tuples with `{source, schema, prefix}` in order to support `from`/`join` prefixes (#2572)
+  * [Ecto.Adapter] The database types `time`, `utc_datetime` and `naive_datetime` should translate to types with seconds precision while the database types `time_usec`, `utc_datetime_usec` and `naive_datetime_usec` should have microseconds precision (#2291)
+  * [Ecto.Adapter] The `on_conflict` argument for `insert` and `insert_all` no longer receives a `{:replace_all, list(), atom()}` tuple. Instead, it receives a `{fields :: [atom()], list(), atom()}` where `fields` is a list of atoms of the fields to be replaced (#2181)
+  * [Ecto.Adapter] `insert`/`update`/`delete` now receive both `:source` and `:prefix` fields instead of a single `:source` field with both `source` and `prefix` in it (#2490)
+  * [Ecto.Adapter.Migration] A new `lock_for_migration/4` callback has been added. It is implemented by default by `Ecto.Adapters.SQL` (#2215)
+  * [Ecto.Adapter.Migration] The `execute_ddl` should now return `{:ok, []}` to make space for returning notices/hints/warnings in the future (adapters leveraging `Ecto.Adapters.SQL` do not have to perform any change)
+  * [Ecto.Query] The `from` field in `Ecto.Query` now returns a `Ecto.Query.FromExpr` with the `:source` field, unifying the behaviour in `from` and `join` expressions (#2497)
+  * [Ecto.Query] Tuple expressions are now supported in queries. For example, `where: {p.foo, p.bar} > {p.bar, p.baz}` should translate to `WHERE (p.foo, p.bar) > (p.bar, p.baz)` in SQL databases. Adapters should be changed to handle `{:{}, meta, exprs}` in the query AST (#2344)
+  * [Ecto.Query] Adapters should support the following arithmetic operators in queries `+`, `-`, `*` and `/` (#2400)
+  * [Ecto.Query] Adapters should support `filter/2` in queries, as in `select: filter(count(p.id), p.public == true)` (#2487)
 
 ## Previous versions
 
-  * See the CHANGELOG.md in the v1.1 branch
+  * See the CHANGELOG.md [in the v2.2 branch](https://github.com/elixir-ecto/ecto/blob/v2.2/CHANGELOG.md)

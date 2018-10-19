@@ -3,10 +3,28 @@ defmodule Mix.Tasks.Ecto.Drop do
   import Mix.Ecto
 
   @shortdoc "Drops the repository storage"
-  @recursive true
+  @default_opts [force: false]
+
+  @aliases [
+    f: :force,
+    q: :quiet
+  ]
+
+  @switches [
+    force: :boolean,
+    quiet: :boolean
+  ]
 
   @moduledoc """
-  Drop the storage for the repository.
+  Drop the storage for the given repository.
+
+  The repositories to drop are the ones specified under the
+  `:ecto_repos` option in the current app configuration. However,
+  if the `-r` option is given, it replaces the `:ecto_repos` config.
+
+  Since Ecto tasks can only be executed once, if you need to drop
+  multiple repositories, set `:ecto_repos` accordingly or pass the `-r`
+  flag multiple times.
 
   ## Examples
 
@@ -15,22 +33,28 @@ defmodule Mix.Tasks.Ecto.Drop do
 
   ## Command line options
 
-    * `-r`, `--repo` - the repo to drop (defaults to `YourApp.Repo`)
     * `--no-compile` - do not compile before stopping
+    * `-r`, `--repo` - the repo to drop
+    * `-q`, `--quiet` - run the command quietly
+    * `-f`, `--force` - do not ask for confirmation when dropping the database.
+      Configuration is asked only when `:start_permanent` is set to true
+      (typically in production)
 
   """
 
   @doc false
   def run(args) do
     repos = parse_repo(args)
-    {opts, _, _} = OptionParser.parse args, switches: [quiet: :boolean]
+    {opts, _, _} = OptionParser.parse args, switches: @switches, aliases: @aliases
+    opts = Keyword.merge(@default_opts, opts)
 
     Enum.each repos, fn repo ->
       ensure_repo(repo, args)
       ensure_implements(repo.__adapter__, Ecto.Adapter.Storage,
-                                          "to drop storage for #{inspect repo}")
+                                          "drop storage for #{inspect repo}")
 
       if skip_safety_warnings?() or
+         opts[:force] or
          Mix.shell.yes?("Are you sure you want to drop the database for repo #{inspect repo}?") do
         drop_database(repo, opts)
       end

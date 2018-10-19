@@ -4,7 +4,7 @@ defmodule Mix.Tasks.Ecto.Gen.Repo do
   import Mix.Ecto
   import Mix.Generator
 
-  @shortdoc "Generate a new repository"
+  @shortdoc "Generates a new repository"
 
   @moduledoc """
   Generates a new repository.
@@ -51,7 +51,7 @@ defmodule Mix.Tasks.Ecto.Gen.Repo do
       {:ok, contents} ->
         Mix.shell.info [:green, "* updating ", :reset, "config/config.exs"]
         File.write! "config/config.exs",
-                    String.replace(contents, "use Mix.Config", config_template(opts))
+                    String.replace(contents, "use Mix.Config\n", config_template(opts))
       {:error, _} ->
         create_file "config/config.exs", config_template(opts)
     end
@@ -60,8 +60,12 @@ defmodule Mix.Tasks.Ecto.Gen.Repo do
 
     Mix.shell.info """
     Don't forget to add your new repo to your supervision tree
-    (typically in lib/#{app}.ex):
+    (typically in lib/#{app}/application.ex):
 
+        # For Elixir v1.5 and later
+        {#{inspect repo}, []}
+
+        # For Elixir v1.4 and earlier
         supervisor(#{inspect repo}, [])
 
     And to add it to the list of ecto repositories in your
@@ -75,7 +79,9 @@ defmodule Mix.Tasks.Ecto.Gen.Repo do
 
   embed_template :repo, """
   defmodule <%= inspect @mod %> do
-    use Ecto.Repo, otp_app: <%= inspect @app %>
+    use Ecto.Repo,
+      otp_app: <%= inspect @app %>,
+      adapter: Ecto.Adapters.Postgres
   end
   """
 
@@ -83,7 +89,6 @@ defmodule Mix.Tasks.Ecto.Gen.Repo do
   use Mix.Config
 
   config <%= inspect @app %>, <%= inspect @mod %>,
-    adapter: Ecto.Adapters.Postgres,
     database: "<%= @app %>_<%= @base %>",
     username: "user",
     password: "pass",

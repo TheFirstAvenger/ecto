@@ -9,10 +9,10 @@ defmodule Ecto.SchemaTest do
     use Ecto.Schema
 
     schema "my schema" do
-      field :name,  :string, default: "eric"
+      field :name,  :string, default: "eric", autogenerate: {String, :upcase, ["eric"]}
       field :email, :string, uniq: true, read_after_writes: true
       field :temp,  :any, default: "temp", virtual: true
-      field :count, :decimal, read_after_writes: true
+      field :count, :decimal, read_after_writes: true, source: :cnt
       field :array, {:array, :string}
       field :uuid, Ecto.UUID, autogenerate: true
       belongs_to :comment, Comment
@@ -26,18 +26,25 @@ defmodule Ecto.SchemaTest do
     assert Schema.__schema__(:fields)             == [:id, :name, :email, :count, :array, :uuid, :comment_id]
     assert Schema.__schema__(:read_after_writes)  == [:email, :count]
     assert Schema.__schema__(:primary_key)        == [:id]
-    assert Schema.__schema__(:autogenerate_id)    == {:id, :id}
+    assert Schema.__schema__(:autogenerate_id)    == {:id, :id, :id}
   end
 
   test "types metadata" do
-    assert Schema.__schema__(:types) ==
-           [id: :id, name: :string, email: :string, count: :decimal,
-            array: {:array, :string}, uuid: Ecto.UUID, comment_id: :id]
     assert Schema.__schema__(:type, :id)         == :id
     assert Schema.__schema__(:type, :name)       == :string
     assert Schema.__schema__(:type, :email)      == :string
     assert Schema.__schema__(:type, :array)      == {:array, :string}
     assert Schema.__schema__(:type, :comment_id) == :id
+  end
+
+  test "sources metadata" do
+    assert Schema.__schema__(:field_source, :id)         == :id
+    assert Schema.__schema__(:field_source, :name)       == :name
+    assert Schema.__schema__(:field_source, :email)      == :email
+    assert Schema.__schema__(:field_source, :array)      == :array
+    assert Schema.__schema__(:field_source, :comment_id) == :comment_id
+    assert Schema.__schema__(:field_source, :count)      == :cnt
+    assert Schema.__schema__(:field_source, :xyz)        == nil
   end
 
   test "changeset metadata" do
@@ -46,26 +53,32 @@ defmodule Ecto.SchemaTest do
              comment_id: :id, temp: :any, id: :id, uuid: Ecto.UUID}
   end
 
+  test "autogenerate metadata (private)" do
+    assert Schema.__schema__(:autogenerate) ==
+           [{[:name], {String, :upcase, ["eric"]}}, {[:uuid], {Ecto.UUID, :autogenerate, []}}]
+    assert Schema.__schema__(:autoupdate) == []
+  end
+
   test "skip field with define_field false" do
     refute Schema.__schema__(:type, :permalink_id)
   end
 
-  test "primary key" do
+  test "primary key operations" do
     assert Ecto.primary_key(%Schema{}) == [id: nil]
     assert Ecto.primary_key(%Schema{id: "hello"}) == [id: "hello"]
   end
 
-  test "reads and writes meta" do
+  test "reads and writes metadata" do
     schema = %Schema{}
-    assert schema.__meta__.source == {nil, "my schema"}
+    assert schema.__meta__.source == "my schema"
+    assert schema.__meta__.prefix == nil
     schema = Ecto.put_meta(schema, source: "new schema")
-    assert schema.__meta__.source == {nil, "new schema"}
+    assert schema.__meta__.source == "new schema"
     schema = Ecto.put_meta(schema, prefix: "prefix")
-    assert schema.__meta__.source == {"prefix", "new schema"}
-    schema = Ecto.put_meta(schema, source: "my schema")
-    assert schema.__meta__.source == {"prefix", "my schema"}
+    assert schema.__meta__.prefix == "prefix"
     assert Ecto.get_meta(schema, :prefix) == "prefix"
-    assert Ecto.get_meta(schema, :source) == "my schema"
+    assert Ecto.get_meta(schema, :source) == "new schema"
+    assert schema.__meta__.schema == Schema
 
     schema = Ecto.put_meta(schema, context: "foobar", state: :loaded)
     assert schema.__meta__.state == :loaded
@@ -74,13 +87,23 @@ defmodule Ecto.SchemaTest do
     assert Ecto.get_meta(schema, :context) == "foobar"
   end
 
-  test "inspects metadata" do
-    schema = %Schema{}
-    assert inspect(schema.__meta__) == "#Ecto.Schema.Metadata<:built>"
+  test "preserves schema on up to date metadata" do
+    old_schema = %Schema{}
+    new_schema = Ecto.put_meta(old_schema, source: "my schema", state: :built, prefix: nil)
+    assert :erts_debug.same(old_schema, new_schema)
   end
 
-  test "default of array field is not []" do
-     assert %Schema{}.array == nil
+  test "inspects metadata" do
+    schema = %Schema{}
+    assert inspect(schema.__meta__) == "#Ecto.Schema.Metadata<:built, \"my schema\">"
+
+    schema = Ecto.put_meta %Schema{}, context: <<0>>
+    assert inspect(schema.__meta__) == "#Ecto.Schema.Metadata<:built, \"my schema\", <<0>>>"
+  end
+
+  test "defaults" do
+    assert %Schema{}.name == "eric"
+    assert %Schema{}.array == nil
   end
 
   defmodule CustomSchema do
@@ -88,24 +111,36 @@ defmodule Ecto.SchemaTest do
 
     @primary_key {:perm, Custom.Permalink, autogenerate: true}
     @foreign_key_type :string
+    @field_source_mapper &(&1 |> Atom.to_string |> String.upcase |> String.to_atom())
 
     schema "users" do
       field :name
       capture_io :stderr, fn ->
         belongs_to :comment, Comment
       end
+      field :same_name, :string, source: :NAME
+      timestamps()
     end
   end
 
   test "custom schema attributes" do
     assert %CustomSchema{perm: "abc"}.perm == "abc"
-    assert CustomSchema.__schema__(:autogenerate_id) == {:perm, :id}
+    assert CustomSchema.__schema__(:autogenerate_id) == {:perm, :PERM, Custom.Permalink}
     assert CustomSchema.__schema__(:type, :comment_id) == :string
   end
 
   test "custom primary key" do
     assert Ecto.primary_key(%CustomSchema{}) == [perm: nil]
     assert Ecto.primary_key(%CustomSchema{perm: "hello"}) == [perm: "hello"]
+  end
+
+  test "custom field source mapper" do
+    assert CustomSchema.__schema__(:field_source, :perm) == :PERM
+    assert CustomSchema.__schema__(:field_source, :name) == :NAME
+    assert CustomSchema.__schema__(:field_source, :same_name) == :NAME
+    assert CustomSchema.__schema__(:field_source, :comment_id) == :COMMENT_ID
+    assert CustomSchema.__schema__(:field_source, :inserted_at) == :INSERTED_AT
+    assert CustomSchema.__schema__(:field_source, :updated_at) == :UPDATED_AT
   end
 
   defmodule EmbeddedSchema do
@@ -117,14 +152,14 @@ defmodule Ecto.SchemaTest do
   end
 
   test "embedded schema" do
-    assert EmbeddedSchema.__schema__(:source)             == nil
-    assert EmbeddedSchema.__schema__(:prefix)             == nil
-    assert EmbeddedSchema.__schema__(:fields)             == [:id, :name]
-    assert EmbeddedSchema.__schema__(:primary_key)        == [:id]
-    assert EmbeddedSchema.__schema__(:autogenerate_id)    == {:id, :binary_id}
+    assert EmbeddedSchema.__schema__(:source)          == nil
+    assert EmbeddedSchema.__schema__(:prefix)          == nil
+    assert EmbeddedSchema.__schema__(:fields)          == [:id, :name]
+    assert EmbeddedSchema.__schema__(:primary_key)     == [:id]
+    assert EmbeddedSchema.__schema__(:autogenerate_id) == {:id, :id, :binary_id}
   end
 
-  test "embeded schema does not have metadata" do
+  test "embedded schema does not have metadata" do
     refute match?(%{__meta__: _}, %EmbeddedSchema{})
   end
 
@@ -144,6 +179,43 @@ defmodule Ecto.SchemaTest do
     assert CustomEmbeddedSchema.__schema__(:primary_key) == []
   end
 
+  defmodule InlineEmbeddedSchema do
+    use Ecto.Schema
+
+    schema "inline_embedded_schema" do
+      embeds_one :one, One, primary_key: false do
+        field :x
+      end
+      embeds_many :many, Many do
+        field :y
+      end
+    end
+  end
+
+  test "inline embedded schema" do
+    assert %Ecto.Embedded{related: InlineEmbeddedSchema.One} =
+      InlineEmbeddedSchema.__schema__(:embed, :one)
+    assert %Ecto.Embedded{related: InlineEmbeddedSchema.Many} =
+      InlineEmbeddedSchema.__schema__(:embed, :many)
+    assert InlineEmbeddedSchema.One.__schema__(:fields)  == [:x]
+    assert InlineEmbeddedSchema.Many.__schema__(:fields) == [:id, :y]
+  end
+
+  defmodule Timestamps do
+    use Ecto.Schema
+
+    schema "timestamps" do
+      timestamps autogenerate: {:m, :f, [:a]}
+    end
+  end
+
+  test "timestamps autogenerate metadata (private)" do
+    assert Timestamps.__schema__(:autogenerate) ==
+           [{[:inserted_at, :updated_at], {:m, :f, [:a]}}]
+    assert Timestamps.__schema__(:autoupdate) ==
+           [{[:updated_at], {:m, :f, [:a]}}]
+  end
+
   ## Schema prefix
 
   defmodule SchemaWithPrefix do
@@ -158,36 +230,36 @@ defmodule Ecto.SchemaTest do
   test "schema prefix metadata" do
     assert SchemaWithPrefix.__schema__(:source) == "company"
     assert SchemaWithPrefix.__schema__(:prefix) == "tenant"
-    assert %SchemaWithPrefix{}.__meta__.source == {"tenant", "company"}
+    assert %SchemaWithPrefix{}.__meta__.source == "company"
+    assert %SchemaWithPrefix{}.__meta__.prefix == "tenant"
   end
 
-  test "schema prefix in queries" do
+  test "schema prefix in queries from" do
     import Ecto.Query
 
     query = from(SchemaWithPrefix, select: 1)
-    assert query.prefix == "tenant"
+    assert query.from.prefix == "tenant"
 
     query = from({"another_company", SchemaWithPrefix}, select: 1)
-    assert query.prefix == "tenant"
+    assert query.from.prefix == "tenant"
 
     from = SchemaWithPrefix
     query = from(from, select: 1)
-    assert query.prefix == "tenant"
+    assert query.from.prefix == "tenant"
 
     from = {"another_company", SchemaWithPrefix}
     query = from(from, select: 1)
-    assert query.prefix == "tenant"
+    assert query.from.prefix == "tenant"
   end
 
-  test "updates meta prefix with put_meta" do
-    schema = %SchemaWithPrefix{}
-    assert schema.__meta__.source == {"tenant", "company"}
-    schema = Ecto.put_meta(schema, source: "new_company")
-    assert schema.__meta__.source == {"tenant", "new_company"}
-    schema = Ecto.put_meta(schema, prefix: "prefix")
-    assert schema.__meta__.source == {"prefix", "new_company"}
-    schema = Ecto.put_meta(schema, prefix: nil)
-    assert schema.__meta__.source == {nil, "new_company"}
+  test "schema prefix in queries join" do
+    import Ecto.Query
+
+    query = from("query", join: _ in SchemaWithPrefix, select: 1)
+    assert hd(query.joins).prefix == "tenant"
+
+    query = from("query", join: _ in {"another_company", SchemaWithPrefix}, select: 1)
+    assert hd(query.joins).prefix == "tenant"
   end
 
   ## Composite primary keys
@@ -242,7 +314,7 @@ defmodule Ecto.SchemaTest do
   end
 
   test "invalid field type" do
-    assert_raise ArgumentError, "invalid type {:apa} for field :name", fn ->
+    assert_raise ArgumentError, "invalid or unknown type {:apa} for field :name", fn ->
       defmodule SchemaInvalidFieldType do
         use Ecto.Schema
 
@@ -261,51 +333,13 @@ defmodule Ecto.SchemaTest do
         end
       end
     end
-  end
 
-  test "raises helpful error for :datetime" do
-    assert_raise ArgumentError, ~r/Maybe you meant to use Ecto.DateTime\?/, fn ->
+    assert_raise ArgumentError, ~r/schema Ecto.SchemaTest.Schema is not a valid type for field :name/, fn ->
       defmodule SchemaInvalidFieldType do
         use Ecto.Schema
 
         schema "invalidtype" do
-          field :published_at, :datetime
-        end
-      end
-    end
-  end
-
-  test "raises helpful error for :date" do
-    assert_raise ArgumentError, ~r/Maybe you meant to use Ecto.Date\?/, fn ->
-      defmodule SchemaInvalidFieldType do
-        use Ecto.Schema
-
-        schema "invalidtype" do
-          field :published_on, :date
-        end
-      end
-    end
-  end
-
-  test "raises helpful error for :time" do
-    assert_raise ArgumentError, ~r/Maybe you meant to use Ecto.Time\?/, fn ->
-      defmodule SchemaInvalidFieldType do
-        use Ecto.Schema
-
-        schema "invalidtype" do
-          field :published_time, :time
-        end
-      end
-    end
-  end
-
-  test "raises helpful error for :uuid" do
-    assert_raise ArgumentError, ~r/Maybe you meant to use Ecto.UUID\?/, fn ->
-      defmodule SchemaInvalidFieldType do
-        use Ecto.Schema
-
-        schema "invalidtype" do
-          field :author_id, :uuid
+          field :name, Schema
         end
       end
     end
@@ -319,18 +353,6 @@ defmodule Ecto.SchemaTest do
         schema :hello do
           field :x, :string
           field :pk, :integer, primary_key: true
-        end
-      end
-    end
-  end
-
-  test "fail invalid default" do
-    assert_raise ArgumentError, "invalid default argument `13` for field :x of type :string", fn ->
-      defmodule DefaultFail do
-        use Ecto.Schema
-
-        schema "hello" do
-          field :x, :string, default: 13
         end
       end
     end
@@ -566,7 +588,7 @@ defmodule Ecto.SchemaTest do
   end
 
   test "has_* expects a queryable" do
-    message = ~r"association queryable must be a schema or {source, schema}, got: 123"
+    message = ~r"association :posts queryable must be a schema or a {source, schema}. got: 123"
     assert_raise ArgumentError, message, fn ->
       defmodule QueryableMisMatch do
         use Ecto.Schema
@@ -599,6 +621,20 @@ defmodule Ecto.SchemaTest do
 
         schema "assoc" do
           has_many :posts, Post, through: [:whatever, :works]
+        end
+      end
+    end
+  end
+
+  test "belongs_to raises helpful error with redundant foreign key name" do
+    name = :author
+    message = ~r"foreign_key :#{name} must be distinct from corresponding association name"
+    assert_raise ArgumentError, message, fn ->
+      defmodule SchemaBadForeignKey do
+        use Ecto.Schema
+
+        schema "fk_assoc_name_clash" do
+          belongs_to name, User, foreign_key: name
         end
       end
     end

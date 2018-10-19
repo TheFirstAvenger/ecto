@@ -1,5 +1,5 @@
 defmodule Ecto.Integration.PreloadTest do
-  use Ecto.Integration.Case, async: true
+  use Ecto.Integration.Case, async: Application.get_env(:ecto, :async_integration_tests, true)
 
   alias Ecto.Integration.TestRepo
   import Ecto.Query
@@ -9,6 +9,19 @@ defmodule Ecto.Integration.PreloadTest do
   alias Ecto.Integration.Permalink
   alias Ecto.Integration.User
   alias Ecto.Integration.Custom
+
+  test "preload with parameter from select_merge" do
+    p1 = TestRepo.insert!(%Post{title: "p1"})
+    TestRepo.insert!(%Comment{text: "c1", post: p1})
+
+    comments =
+      from(c in Comment, select: struct(c, [:text]))
+      |> select_merge([c], %{post_id: c.post_id})
+      |> preload(:post)
+      |> TestRepo.all()
+
+    assert [%{text: "c1", post: %{title: "p1"}}] = comments
+  end
 
   test "preload has_many" do
     p1 = TestRepo.insert!(%Post{title: "1"})
@@ -162,6 +175,18 @@ defmodule Ecto.Integration.PreloadTest do
     assert c3.post_permalink.id == lid2
   end
 
+  test "preload through with nil association" do
+    %Comment{} = c = TestRepo.insert!(%Comment{post_id: nil})
+
+    c = TestRepo.preload(c, [:post, :post_permalink])
+    assert c.post == nil
+    assert c.post_permalink == nil
+
+    c = TestRepo.preload(c, [:post, :post_permalink])
+    assert c.post == nil
+    assert c.post_permalink == nil
+  end
+
   test "preload has_many through-through" do
     %Post{id: pid1} = TestRepo.insert!(%Post{})
     %Post{id: pid2} = TestRepo.insert!(%Post{})
@@ -292,6 +317,54 @@ defmodule Ecto.Integration.PreloadTest do
     assert [] = pe3.comments
   end
 
+  test "preload many_to_many with function" do
+    p1 = TestRepo.insert!(%Post{title: "1"})
+    p2 = TestRepo.insert!(%Post{title: "2"})
+    p3 = TestRepo.insert!(%Post{title: "3"})
+
+    # We use the same name to expose bugs in preload sorting
+    %User{id: uid1} = TestRepo.insert!(%User{name: "1"})
+    %User{id: uid3} = TestRepo.insert!(%User{name: "2"})
+    %User{id: uid2} = TestRepo.insert!(%User{name: "2"})
+    %User{id: uid4} = TestRepo.insert!(%User{name: "3"})
+
+    TestRepo.insert_all "posts_users", [[post_id: p1.id, user_id: uid1],
+                                        [post_id: p1.id, user_id: uid2],
+                                        [post_id: p2.id, user_id: uid3],
+                                        [post_id: p2.id, user_id: uid4],
+                                        [post_id: p3.id, user_id: uid1],
+                                        [post_id: p3.id, user_id: uid4]]
+
+    wrong_preloader = fn post_ids ->
+      TestRepo.all(
+        from u in User,
+             join: pu in "posts_users",
+             where: pu.post_id in ^post_ids and pu.user_id == u.id,
+             order_by: u.id,
+             select: map(u, [:id])
+      )
+    end
+
+    assert_raise RuntimeError, ~r/invalid custom preload for `users` on `Ecto.Integration.Post`/, fn ->
+      TestRepo.preload([p1, p2, p3], users: wrong_preloader)
+    end
+
+    right_preloader = fn post_ids ->
+      TestRepo.all(
+        from u in User,
+             join: pu in "posts_users",
+             where: pu.post_id in ^post_ids and pu.user_id == u.id,
+             order_by: u.id,
+             select: {pu.post_id, map(u, [:id])}
+      )
+    end
+
+    [p1, p2, p3] = TestRepo.preload([p1, p2, p3], users: right_preloader)
+    assert p1.users == [%{id: uid1}, %{id: uid2}]
+    assert p2.users == [%{id: uid3}, %{id: uid4}]
+    assert p3.users == [%{id: uid1}, %{id: uid4}]
+  end
+
   test "preload with query" do
     p1 = TestRepo.insert!(%Post{title: "1"})
     p2 = TestRepo.insert!(%Post{title: "2"})
@@ -356,7 +429,7 @@ defmodule Ecto.Integration.PreloadTest do
     np1 = TestRepo.preload(p1, comments_authors: from(u in User, where: u.name == "foo"))
     assert np1.comments_authors == [u1]
 
-    assert_raise ArgumentError, ~r/custom query did not return a map/, fn ->
+    assert_raise ArgumentError, ~r/Ecto expected a map\/struct with the key `id` but got: \d+/, fn ->
       TestRepo.preload(p1, comments_authors: from(u in User, order_by: u.name, select: u.id))
     end
 

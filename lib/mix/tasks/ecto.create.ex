@@ -3,10 +3,17 @@ defmodule Mix.Tasks.Ecto.Create do
   import Mix.Ecto
 
   @shortdoc "Creates the repository storage"
-  @recursive true
 
   @moduledoc """
-  Create the storage for the repository.
+  Create the storage for the given repository.
+
+  The repositories to create are the ones specified under the
+  `:ecto_repos` option in the current app configuration. However,
+  if the `-r` option is given, it replaces the `:ecto_repos` config.
+
+  Since Ecto tasks can only be executed once, if you need to create
+  multiple repositories, set `:ecto_repos` accordingly or pass the `-r`
+  flag multiple times.
 
   ## Examples
 
@@ -15,7 +22,7 @@ defmodule Mix.Tasks.Ecto.Create do
 
   ## Command line options
 
-    * `-r`, `--repo` - the repo to create (defaults to `YourApp.Repo`)
+    * `-r`, `--repo` - the repo to create
     * `--no-compile` - do not compile before creating
     * `--quiet` - do not log output
 
@@ -29,7 +36,7 @@ defmodule Mix.Tasks.Ecto.Create do
     Enum.each repos, fn repo ->
       ensure_repo(repo, args)
       ensure_implements(repo.__adapter__, Ecto.Adapter.Storage,
-                                          "to create storage for #{inspect repo}")
+                                          "create storage for #{inspect repo}")
       case repo.__adapter__.storage_up(repo.config) do
         :ok ->
           unless opts[:quiet] do

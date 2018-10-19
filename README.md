@@ -1,22 +1,27 @@
-# Ecto
+<img width="250" src="https://github.com/elixir-ecto/ecto/raw/master/guides/images/logo.png" alt="Ecto">
 
-[![Build Status](https://travis-ci.org/elixir-lang/ecto.svg?branch=master)](https://travis-ci.org/elixir-lang/ecto)
-[![Inline docs](http://inch-ci.org/github/elixir-lang/ecto.svg?branch=master&style=flat)](http://inch-ci.org/github/elixir-lang/ecto)
+---
 
-Ecto is a domain specific language for writing queries and interacting with databases in Elixir. Here is an example:
+[![Build Status](https://travis-ci.org/elixir-ecto/ecto.svg?branch=master)](https://travis-ci.org/elixir-ecto/ecto)
+
+Ecto is a toolkit for data mapping and language integrated query for Elixir. Here is an example:
 
 ```elixir
 # In your config/config.exs file
+config :my_app, ecto_repos: [Sample.Repo]
+
 config :my_app, Sample.Repo,
-  adapter: Ecto.Adapters.Postgres,
   database: "ecto_simple",
   username: "postgres",
-  password: "postgres"
+  password: "postgres",
+  hostname: "localhost",
+  port: "5432"
 
 # In your application code
 defmodule Sample.Repo do
   use Ecto.Repo,
-    otp_app: :my_app
+    otp_app: :my_app,
+    adapter: Ecto.Adapters.Postgres
 end
 
 defmodule Sample.Weather do
@@ -32,13 +37,14 @@ end
 
 defmodule Sample.App do
   import Ecto.Query
-  alias Sample.Weather
-  alias Sample.Repo
+  alias Sample.{Weather, Repo}
 
   def keyword_query do
-    query = from w in Weather,
-         where: w.prcp > 0 or is_nil(w.prcp),
-         select: w
+    query =
+      from w in Weather,
+           where: w.prcp > 0 or is_nil(w.prcp),
+           select: w
+
     Repo.all(query)
   end
 
@@ -52,99 +58,89 @@ defmodule Sample.App do
 end
 ```
 
-See the [online documentation](http://hexdocs.pm/ecto) or [run the sample application](https://github.com/elixir-lang/ecto/tree/master/examples/simple) for more information.
+Ecto is commonly used to interact with databases, such as Postgres and MySQL via [Ecto.Adapters.SQL](http://hexdocs.pm/ecto_sql) ([source code](https://github.com/elixir-ecto/ecto_sql)). Ecto is also commonly used to map data from any source into Elixir structs, regardless if they are backed by a database or not.
+
+See the [getting started guide](http://hexdocs.pm/ecto/getting-started.html) and the [online documentation](http://hexdocs.pm/ecto).
+
+Also checkout the ["What's new in Ecto 2.1"](http://pages.plataformatec.com.br/ebook-whats-new-in-ecto-2-0) free ebook to learn more about many features since Ecto 2.1 such as `many_to_many`, schemaless queries, concurrent testing, upsert and more. Note the book still largely applies to Ecto 3.0 as the major change in Ecto 3.0 was the split of Ecto in two repositories (`ecto` and `ecto_sql`) and the removal of the outdated Ecto datetime types in favor of Elixir's Calendar types.
 
 ## Usage
 
 You need to add both Ecto and the database adapter as a dependency to your `mix.exs` file. The supported databases and their adapters are:
 
-Database   | Ecto Adapter           | Dependency                   | Ecto 2.0 compatible?
-:----------| :--------------------- | :----------------------------| :-------------------
-PostgreSQL | Ecto.Adapters.Postgres | [postgrex][postgrex]         | Yes
-MySQL      | Ecto.Adapters.MySQL    | [mariaex][mariaex]           | Yes
-MSSQL      | Tds.Ecto               | [tds_ecto][tds_ecto]         | No
-SQLite3    | Sqlite.Ecto            | [sqlite_ecto][sqlite_ecto]   | No
-MongoDB    | Mongo.Ecto             | [mongodb_ecto][mongodb_ecto] | No
+Database   | Ecto Adapter           | Dependencies                                    | Ecto 3.0 compatible?
+:----------| :--------------------- | :-----------------------------------------------| :----
+PostgreSQL | Ecto.Adapters.Postgres | [ecto_sql][ecto_sql] + [postgrex][postgrex]     | Yes
+MySQL      | Ecto.Adapters.MySQL    | [ecto_sql][ecto_sql] + [mariaex][mariaex]       | Yes
+MSSQL      | MssqlEcto              | [ecto_sql][ecto_sql] + [mssql_ecto][mssql_ecto] | No
+MSSQL      | Tds.Ecto               | [ecto_sql][ecto_sql] + [tds_ecto][tds_ecto]     | No
+SQLite     | Sqlite.Ecto2           | [ecto][ecto] + [sqlite_ecto2][sqlite_ecto2]     | No
+Mnesia     | EctoMnesia.Adapter     | [ecto][ecto] + [ecto_mnesia][ecto_mnesia]       | No
 
-[postgrex]: http://github.com/ericmj/postgrex
+[ecto]: http://github.com/elixir-ecto/ecto
+[ecto_sql]: http://github.com/elixir-ecto/ecto_sql
+[postgrex]: http://github.com/elixir-ecto/postgrex
 [mariaex]: http://github.com/xerions/mariaex
+[mssql_ecto]: https://github.com/findmypast-oss/mssql_ecto
 [tds_ecto]: https://github.com/livehelpnow/tds_ecto
-[sqlite_ecto]: https://github.com/jazzyb/sqlite_ecto
-[mongodb_ecto]: https://github.com/michalmuskala/mongodb_ecto
+[sqlite_ecto2]: https://github.com/scouten/sqlite_ecto2
+[ecto_mnesia]: https://github.com/Nebo15/ecto_mnesia
 
 For example, if you want to use PostgreSQL, add to your `mix.exs` file:
 
 ```elixir
 defp deps do
-  [{:postgrex, ">= 0.0.0"},
-   {:ecto, "~> 2.0.0-beta"}]
-end
-```
-
-and update your applications list to include both projects:
-
-```elixir
-def application do
-  [applications: [:postgrex, :ecto]]
+  [
+    {:ecto_sql, "~> 3.0"},
+    {:postgrex, ">= 0.0.0"}
+  ]
 end
 ```
 
 Then run `mix deps.get` in your shell to fetch the dependencies. If you want to use another database, just choose the proper dependency from the table above.
 
-Finally, in the repository configuration, you will need to specify the `adapter:` respective to the chosen dependency. For PostgreSQL it is:
+Finally, in the repository definition, you will need to specify the `adapter:` respective to the chosen dependency. For PostgreSQL it is:
 
 ```elixir
-config :my_app, Repo,
-  adapter: Ecto.Adapters.Postgres,
+defmodule MyApp.Repo do
+  use Ecto.Repo,
+    otp_app: :my_app,
+    adapter: Ecto.Adapters.Postgres,
   ...
 ```
 
-We are currently looking for contributions to add support for other SQL databases and folks interested in exploring non-relational databases too.
+## Supported Versions
+
+| Branch | Support                  |
+| ------ | ------------------------ |
+| v3.0   | Bug fixes                |
+| v2.2   | Security patches only    |
+| v2.1   | Unsupported from 10/2018 |
+| v2.0   | Unsupported from 08/2017 |
+| v1.1   | Unsupported from 03/2018 |
+| v1.0   | Unsupported from 05/2017 |
+
+With the version 3.0, Ecto has become API stable. This means no more new features, although we will continue providing bug fixes and updates. For everyone running Ecto in production, rest assured that Ecto will continue to be a well maintained project with the same production quality and polish that our users are familiar with.
 
 ## Important links
 
   * [Documentation](http://hexdocs.pm/ecto)
   * [Mailing list](https://groups.google.com/forum/#!forum/elixir-ecto)
-  * [Examples](https://github.com/elixir-lang/ecto/tree/master/examples)
-
-## Contributing
-
-Contributions are welcome! In particular, remember to:
-
-* Do not use the issues tracker for help or support requests (try Stack Overflow, IRC or mailing lists, etc).
-* For proposing a new feature, please start a discussion on [elixir-ecto](https://groups.google.com/forum/#!forum/elixir-ecto).
-* For bugs, do a quick search in the issues tracker and make sure the bug has not yet been reported.
-* Finally, be nice and have fun! Remember all interactions in this project follow the same [Code of Conduct as Elixir](https://github.com/elixir-lang/elixir/blob/master/CODE_OF_CONDUCT.md).
+  * [Examples](https://github.com/elixir-ecto/ecto/tree/master/examples)
 
 ### Running tests
 
 Clone the repo and fetch its dependencies:
 
-```
-$ git clone https://github.com/elixir-lang/ecto.git
-$ cd ecto
-$ mix deps.get
-$ mix test
-```
-
-Besides the unit tests above, it is recommended to run the adapter integration tests too:
-
-```
-# Run only PostgreSQL tests (version of PostgreSQL must be >= 9.4 to support jsonb)
-MIX_ENV=pg mix test
-
-# Run all tests (unit and all adapters/pools)
-mix test.all
-```
-
-### Building docs
-
-```
-$ MIX_ENV=docs mix docs
-```
+    $ git clone https://github.com/elixir-ecto/ecto.git
+    $ cd ecto
+    $ mix deps.get
+    $ mix test
 
 ## Copyright and License
 
-Copyright (c) 2012, Plataformatec.
+"Ecto" and the Ecto logo are copyright (c) 2012 Plataformatec.
+
+The Ecto logo was designed by [Dane Wesolko](http://www.danewesolko.com).
 
 Ecto source code is licensed under the [Apache 2 License](LICENSE.md).

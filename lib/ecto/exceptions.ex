@@ -81,29 +81,64 @@ defmodule Ecto.InvalidChangesetError do
   defexception [:action, :changeset]
 
   def message(%{action: action, changeset: changeset}) do
+    changes = extract_changes(changeset)
+    errors = Ecto.Changeset.traverse_errors(changeset, & &1)
+
     """
     could not perform #{action} because changeset is invalid.
 
-    * Changeset changes
+    Errors
 
-    #{inspect changeset.changes}
+    #{pretty errors}
 
-    * Changeset params
+    Applied changes
 
-    #{inspect changeset.params}
+    #{pretty changes}
 
-    * Changeset errors
+    Params
 
-    #{inspect changeset.errors}
+    #{pretty changeset.params}
+
+    Changeset
+
+    #{pretty changeset}
     """
   end
+
+  defp pretty(term) do
+    inspect(term, pretty: true)
+    |> String.split("\n")
+    |> Enum.map_join("\n", &"    " <> &1)
+  end
+
+  defp extract_changes(%Ecto.Changeset{changes: changes}) do
+    Enum.reduce(changes, %{}, fn({key, value}, acc) ->
+      case value do
+        %Ecto.Changeset{action: :delete} -> acc
+        _ -> Map.put(acc, key, extract_changes(value))
+      end
+    end)
+  end
+  defp extract_changes([%Ecto.Changeset{action: :delete} | tail]),
+    do: extract_changes(tail)
+  defp extract_changes([%Ecto.Changeset{} = changeset | tail]),
+    do: [extract_changes(changeset) | extract_changes(tail)]
+  defp extract_changes(other),
+    do: other
 end
 
 defmodule Ecto.CastError do
   @moduledoc """
   Raised when a changeset can't cast a value.
   """
-  defexception [:message]
+  defexception [:message, :type, :value]
+
+  def exception(opts) do
+    type  = Keyword.fetch!(opts, :type)
+    value = Keyword.fetch!(opts, :value)
+    msg   = opts[:message] || "cannot cast #{inspect value} to #{inspect type}"
+    %__MODULE__{message: msg, type: type, value: value}
+  end
 end
 
 defmodule Ecto.InvalidURLError do
@@ -146,7 +181,37 @@ defmodule Ecto.NoPrimaryKeyValueError do
 end
 
 defmodule Ecto.ChangeError do
-  defexception [:message]
+  defexception [:action, :schema, :field, :type, :value]
+
+  def message(%{type: :decimal, value: %Decimal{coef: coef}} = exception) when coef in [:inf, :qNaN, :sNaN] do
+    common_message(exception) <>
+      """
+      \n\n`+Infinity`, `-Infinity`, and `NaN` values are not supported, even though the `Decimal` library handles them. \
+      To support them, you can create a custom type.
+      """
+  end
+
+  def message(%{type: type, value: %schema{microsecond: microsecond}} = exception)
+      when type in [:time, :naive_datetime, :utc_datetime] and microsecond != {0, 0} do
+
+    common_message(exception) <>
+      "\n\nMicroseconds must be empty. Use `#{inspect schema}.truncate(#{type}, :second)` (available in Elixir v1.6+) to remove microseconds."
+  end
+
+  def message(%{type: type, value: %{microsecond: {_, precision}}} = exception)
+      when type in [:time_usec, :naive_datetime_usec, :utc_datetime_usec] and precision != 6 do
+
+    common_message(exception) <> "\n\nMicrosecond precision is required."
+  end
+
+  def message(exception) do
+    common_message(exception)
+  end
+
+  defp common_message(%{action: action, schema: schema, field: field, type: type, value: value}) do
+    "value `#{inspect value}` for `#{inspect schema}.#{field}` " <>
+      "in `#{action}` does not match type #{inspect type}"
+  end
 end
 
 defmodule Ecto.NoResultsError do
@@ -176,6 +241,30 @@ defmodule Ecto.MultipleResultsError do
     expected at most one result but got #{count} in query:
 
     #{Inspect.Ecto.Query.to_string(query)}
+    """
+
+    %__MODULE__{message: msg}
+  end
+end
+
+defmodule Ecto.MultiplePrimaryKeyError do
+  defexception [:message]
+
+  def exception(opts) do
+    operation = Keyword.fetch!(opts, :operation)
+    source = Keyword.fetch!(opts, :source)
+    params = Keyword.fetch!(opts, :params)
+    count = Keyword.fetch!(opts, :count)
+
+    msg = """
+    expected #{operation} on #{source} to return at most one entry but got #{count} entries.
+
+    This typically means the field(s) set as primary_key in your schema/source
+    are not enough to uniquely identify entries in the repository.
+
+    Those are the parameters sent to the repository:
+
+    #{inspect params}
     """
 
     %__MODULE__{message: msg}
@@ -218,17 +307,20 @@ defmodule Ecto.ConstraintError do
           "The changeset has not defined any constraint."
         constraints ->
           "The changeset defined the following constraints:\n\n" <>
-            Enum.map_join(constraints, "\n", &"    * #{&1.type}: #{&1.constraint}")
+            Enum.map_join(constraints, "\n", &"    * #{&1.constraint} (#{&1.type}_constraint)")
       end
 
     msg = """
     constraint error when attempting to #{action} struct:
 
-        * #{type}: #{constraint}
+        * #{constraint} (#{type}_constraint)
 
-    If you would like to convert this constraint into an error, please
-    call #{type}_constraint/3 in your changeset and define the proper
-    constraint name. #{constraints}
+    If you would like to stop this constraint violation from raising an
+    exception and instead add it as an error to your changeset, please
+    call `#{type}_constraint/3` on your changeset with the constraint
+    `:name` as an option.
+
+    #{constraints}
     """
 
     %__MODULE__{message: msg, type: type, constraint: constraint}

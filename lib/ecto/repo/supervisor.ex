@@ -2,8 +2,8 @@ defmodule Ecto.Repo.Supervisor do
   @moduledoc false
   use Supervisor
 
-  @defaults [timeout: 15000, pool_timeout: 5000, pool_size: 10]
-  @integer_url_query_params ["timeout", "pool_size", "pool_timeout"]
+  @defaults [timeout: 15000, pool_size: 10]
+  @integer_url_query_params ["timeout", "pool_size"]
 
   @doc """
   Starts the repo supervisor.
@@ -58,28 +58,17 @@ defmodule Ecto.Repo.Supervisor do
   @doc """
   Retrieves the compile time configuration.
   """
-  def compile_config(repo, opts) do
+  def compile_config(_repo, opts) do
     otp_app = Keyword.fetch!(opts, :otp_app)
-    config  = Application.get_env(otp_app, repo, [])
-    adapter = opts[:adapter] || deprecated_adapter(otp_app, repo, config)
+    adapter = opts[:adapter]
 
     unless adapter do
       raise ArgumentError, "missing :adapter option on use Ecto.Repo"
     end
 
-    unless Code.ensure_loaded?(adapter) do
+    if Code.ensure_compiled(adapter) != {:module, adapter} do
       raise ArgumentError, "adapter #{inspect adapter} was not compiled, " <>
                            "ensure it is correct and it is included as a project dependency"
-    end
-
-    if opts[:loggers] || config[:loggers] do
-      IO.warn """
-      the :loggers configuration for #{inspect(repo)} is deprecated.
-
-        * To customize the log level, set log: :debug | :info | :warn | :error instead
-        * To disable logging, set log: false instead
-        * To hook into logging events, see the \"Telemetry Events\" section in Ecto.Repo docs
-      """
     end
 
     behaviours =
@@ -93,22 +82,6 @@ defmodule Ecto.Repo.Supervisor do
     end
 
     {otp_app, adapter, behaviours}
-  end
-
-  defp deprecated_adapter(otp_app, repo, config) do
-    if adapter = config[:adapter] do
-      IO.warn """
-      retrieving the :adapter from config files for #{inspect repo} is deprecated.
-      Instead pass the adapter configuration when defining the module:
-
-          defmodule #{inspect repo} do
-            use Ecto.Repo,
-              otp_app: #{inspect otp_app},
-              adapter: #{inspect adapter}
-      """
-
-      adapter
-    end
   end
 
   @doc """
@@ -135,17 +108,27 @@ defmodule Ecto.Repo.Supervisor do
     destructure [username, password], info.userinfo && String.split(info.userinfo, ":")
     "/" <> database = info.path
 
-    url_opts = [username: username,
-                password: password,
-                database: database,
-                hostname: info.host,
-                port:     info.port]
+    url_opts = [
+      username: username,
+      password: password,
+      database: database,
+      port: info.port
+    ]
 
+    url_opts = put_hostname_if_present(url_opts, info.host)
     query_opts = parse_uri_query(info)
 
     for {k, v} <- url_opts ++ query_opts,
         not is_nil(v),
         do: {k, if(is_binary(v), do: URI.decode(v), else: v)}
+  end
+
+  defp put_hostname_if_present(keyword, "") do
+    keyword
+  end
+
+  defp put_hostname_if_present(keyword, hostname) when is_binary(hostname) do
+    Keyword.put(keyword, :hostname, hostname)
   end
 
   defp parse_uri_query(%URI{query: nil}),
@@ -163,8 +146,8 @@ defmodule Ecto.Repo.Supervisor do
       {key, value}, acc when key in @integer_url_query_params ->
         [{String.to_atom(key), parse_integer!(key, value, url)}] ++ acc
 
-      {key, _value}, _acc ->
-        raise Ecto.InvalidURLError, url: url, message: "unsupported query parameter `#{key}`"
+      {key, value}, acc ->
+        [{String.to_atom(key), value}] ++ acc
     end)
   end
 
@@ -182,23 +165,31 @@ defmodule Ecto.Repo.Supervisor do
 
   ## Callbacks
 
+  @doc false
   def init({name, repo, otp_app, adapter, opts}) do
     case runtime_config(:supervisor, repo, otp_app, opts) do
       {:ok, opts} ->
+        :telemetry.execute(
+          [:ecto, :repo, :init],
+          %{system_time: System.system_time()},
+          %{repo: repo, opts: opts}
+        )
+
         {:ok, child, meta} = adapter.init([repo: repo] ++ opts)
         cache = Ecto.Query.Planner.new_query_cache(name)
-        child = wrap_start(child, [adapter, cache, meta])
-        supervise([child], strategy: :one_for_one, max_restarts: 0)
+        meta = Map.merge(meta, %{repo: repo, cache: cache})
+        child_spec = wrap_child_spec(child, [adapter, meta])
+        Supervisor.init([child_spec], strategy: :one_for_one, max_restarts: 0)
 
       :ignore ->
         :ignore
     end
   end
 
-  def start_child({mod, fun, args}, adapter, cache, meta) do
+  def start_child({mod, fun, args}, adapter, meta) do
     case apply(mod, fun, args) do
       {:ok, pid} ->
-        meta = Map.merge(meta, %{pid: pid, cache: cache})
+        meta = Map.put(meta, :pid, pid)
         Ecto.Repo.Registry.associate(self(), {adapter, meta})
         {:ok, pid}
 
@@ -207,11 +198,11 @@ defmodule Ecto.Repo.Supervisor do
     end
   end
 
-  defp wrap_start({id, start, restart, shutdown, type, mods}, args) do
+  defp wrap_child_spec({id, start, restart, shutdown, type, mods}, args) do
     {id, {__MODULE__, :start_child, [start | args]}, restart, shutdown, type, mods}
   end
 
-  defp wrap_start(%{start: start} = spec, args) do
+  defp wrap_child_spec(%{start: start} = spec, args) do
     %{spec | start: {__MODULE__, :start_child, [start | args]}}
   end
 end

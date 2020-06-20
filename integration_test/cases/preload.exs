@@ -152,8 +152,8 @@ defmodule Ecto.Integration.PreloadTest do
     %Post{id: pid1} = TestRepo.insert!(%Post{})
     %Post{id: pid2} = TestRepo.insert!(%Post{})
 
-    %Permalink{id: lid1} = TestRepo.insert!(%Permalink{post_id: pid1})
-    %Permalink{id: lid2} = TestRepo.insert!(%Permalink{post_id: pid2})
+    %Permalink{id: lid1} = TestRepo.insert!(%Permalink{post_id: pid1, url: "1"})
+    %Permalink{id: lid2} = TestRepo.insert!(%Permalink{post_id: pid2, url: "2"})
 
     %Comment{} = c1 = TestRepo.insert!(%Comment{post_id: pid1})
     %Comment{} = c2 = TestRepo.insert!(%Comment{post_id: pid1})
@@ -191,8 +191,8 @@ defmodule Ecto.Integration.PreloadTest do
     %Post{id: pid1} = TestRepo.insert!(%Post{})
     %Post{id: pid2} = TestRepo.insert!(%Post{})
 
-    %Permalink{} = l1 = TestRepo.insert!(%Permalink{post_id: pid1})
-    %Permalink{} = l2 = TestRepo.insert!(%Permalink{post_id: pid2})
+    %Permalink{} = l1 = TestRepo.insert!(%Permalink{post_id: pid1, url: "1"})
+    %Permalink{} = l2 = TestRepo.insert!(%Permalink{post_id: pid2, url: "2"})
 
     %User{id: uid1} = TestRepo.insert!(%User{name: "foo"})
     %User{id: uid2} = TestRepo.insert!(%User{name: "bar"})
@@ -387,7 +387,7 @@ defmodule Ecto.Integration.PreloadTest do
 
     # With custom select
     assert [pe3, pe1, pe2] = TestRepo.preload([p3, p1, p2],
-                                              comments: from(c in Comment, select: c.id))
+                                              comments: from(c in Comment, select: c.id, order_by: c.id))
     assert [^cid1, ^cid2] = pe1.comments
     assert [^cid3, ^cid4] = pe2.comments
     assert [] = pe3.comments
@@ -553,16 +553,16 @@ defmodule Ecto.Integration.PreloadTest do
     assert u.custom.bid == c.bid
   end
 
-  test "preload skips with association set but without id" do
+  test "preload raises with association set but without id" do
     c1 = TestRepo.insert!(%Comment{text: "1"})
     u1 = TestRepo.insert!(%User{name: "name"})
-    p1 = TestRepo.insert!(%Post{title: "title"})
+    updated = %{c1 | author: u1, author_id: nil}
 
-    c1 = %{c1 | author: u1, author_id: nil, post: p1, post_id: nil}
+    assert ExUnit.CaptureIO.capture_io(:stderr, fn ->
+      assert TestRepo.preload(updated, [:author]).author == u1
+    end) =~ ~r/its association key `author_id` is nil/
 
-    c1 = TestRepo.preload(c1, [:author, :post])
-    assert c1.author == u1
-    assert c1.post == p1
+    assert TestRepo.preload(updated, [:author], force: true).author == nil
   end
 
   test "preload skips already loaded for cardinality one" do

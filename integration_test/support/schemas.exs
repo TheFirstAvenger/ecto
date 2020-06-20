@@ -1,10 +1,14 @@
+Code.require_file("types.exs", __DIR__)
+
 defmodule Ecto.Integration.Schema do
   defmacro __using__(_) do
     quote do
       use Ecto.Schema
+
       type =
         Application.get_env(:ecto, :primary_key_type) ||
-        raise ":primary_key_type not set in :ecto application"
+          raise ":primary_key_type not set in :ecto application"
+
       @primary_key {:id, type, autogenerate: true}
       @foreign_key_type type
     end
@@ -28,19 +32,21 @@ defmodule Ecto.Integration.Post do
   schema "posts" do
     field :counter, :id # Same as integer
     field :title, :string
-    field :text, :binary
+    field :blob, :binary
     field :temp, :string, default: "temp", virtual: true
     field :public, :boolean, default: true
     field :cost, :decimal
     field :visits, :integer
+    field :wrapped_visits, WrappedInteger
     field :intensity, :float
     field :bid, :binary_id
-    field :uuid, Ecto.UUID, autogenerate: true
+    field :uuid, Ecto.Integration.TestRepo.uuid(), autogenerate: true
     field :meta, :map
     field :links, {:map, :string}
     field :intensities, {:map, :float}
     field :posted, :date
     has_many :comments, Ecto.Integration.Comment, on_delete: :delete_all, on_replace: :delete
+    # The post<->permalink relationship should be marked as uniq
     has_one :permalink, Ecto.Integration.Permalink, on_delete: :delete_all, on_replace: :delete
     has_one :update_permalink, Ecto.Integration.Permalink, foreign_key: :post_id, on_delete: :delete_all, on_replace: :update
     has_many :comments_authors, through: [:comments, :author]
@@ -53,12 +59,12 @@ defmodule Ecto.Integration.Post do
       join_through: Ecto.Integration.PostUserCompositePk
     has_many :users_comments, through: [:users, :comments]
     has_many :comments_authors_permalinks, through: [:comments_authors, :permalink]
-    timestamps()
     has_one :post_user_composite_pk, Ecto.Integration.PostUserCompositePk
+    timestamps()
   end
 
   def changeset(schema, params) do
-    cast(schema, params, ~w(counter title text temp public cost visits
+    cast(schema, params, ~w(counter title blob temp public cost visits
                            intensity bid uuid meta posted)a)
   end
 end
@@ -100,6 +106,8 @@ defmodule Ecto.Integration.Permalink do
 
   schema "permalinks" do
     field :url, :string, source: :uniform_resource_locator
+    field :title, :string
+    field :posted, :date, virtual: true
     belongs_to :post, Ecto.Integration.Post, on_replace: :nilify
     belongs_to :update_post, Ecto.Integration.Post, on_replace: :update, foreign_key: :post_id, define_field: false
     belongs_to :user, Ecto.Integration.User
@@ -107,7 +115,7 @@ defmodule Ecto.Integration.Permalink do
   end
 
   def changeset(schema, params) do
-    Ecto.Changeset.cast(schema, params, [:url])
+    Ecto.Changeset.cast(schema, params, [:url, :title])
   end
 end
 
@@ -163,7 +171,7 @@ defmodule Ecto.Integration.Custom do
 
   @primary_key {:bid, :binary_id, autogenerate: true}
   schema "customs" do
-    field :uuid, Ecto.UUID
+    field :uuid, Ecto.Integration.TestRepo.uuid()
     many_to_many :customs, Ecto.Integration.Custom,
       join_through: "customs_customs", join_keys: [custom_id1: :bid, custom_id2: :bid],
       on_delete: :delete_all, on_replace: :delete
@@ -197,7 +205,7 @@ defmodule Ecto.Integration.Tag do
 
   schema "tags" do
     field :ints, {:array, :integer}
-    field :uuids, {:array, Ecto.UUID}
+    field :uuids, {:array, Ecto.Integration.TestRepo.uuid()}
     embeds_many :items, Ecto.Integration.Item
   end
 end
@@ -212,6 +220,7 @@ defmodule Ecto.Integration.Item do
   use Ecto.Schema
 
   embedded_schema do
+    field :reference, PrefixedString
     field :price, :integer
     field :valid_at, :date
 
@@ -238,13 +247,17 @@ defmodule Ecto.Integration.Order do
   @moduledoc """
   This module is used to test:
 
+    * Text columns
     * Embedding one schema
 
   """
   use Ecto.Integration.Schema
 
   schema "orders" do
+    field :meta, :map
     embeds_one :item, Ecto.Integration.Item
+    embeds_many :items, Ecto.Integration.Item
+    belongs_to :permalink, Ecto.Integration.Permalink
   end
 end
 
@@ -301,7 +314,7 @@ defmodule Ecto.Integration.PostUserCompositePk do
   end
 end
 
-defmodule Ecto.Integration.Article do
+defmodule Ecto.Integration.Usec do
   @moduledoc """
   This module is used to test:
 
@@ -310,8 +323,8 @@ defmodule Ecto.Integration.Article do
   """
   use Ecto.Integration.Schema
 
-  schema "articles" do
-    field :published_at, :naive_datetime_usec
-    field :submitted_at, :utc_datetime_usec
+  schema "usecs" do
+    field :naive_datetime_usec, :naive_datetime_usec
+    field :utc_datetime_usec, :utc_datetime_usec
   end
 end

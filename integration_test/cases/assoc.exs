@@ -1,5 +1,3 @@
-Code.require_file "../support/types.exs", __DIR__
-
 defmodule Ecto.Integration.AssocTest do
   use Ecto.Integration.Case, async: Application.get_env(:ecto, :async_integration_tests, true)
 
@@ -73,10 +71,11 @@ defmodule Ecto.Integration.AssocTest do
     assert [^u2, ^u1] = TestRepo.all(query)
 
     # Dynamic through
-    Ecto.assoc([p1, p2], [:comments, :author]) |> order_by([a], a.name)
+    query = Ecto.assoc([p1, p2], [:comments, :author]) |> order_by([a], a.name)
     assert [^u2, ^u1] = TestRepo.all(query)
   end
 
+  @tag :on_replace_nilify
   test "has_many through-through assoc leading" do
     p1 = TestRepo.insert!(%Post{})
     p2 = TestRepo.insert!(%Post{})
@@ -116,9 +115,9 @@ defmodule Ecto.Integration.AssocTest do
   end
 
   test "many_to_many assoc" do
-    p1 = TestRepo.insert!(%Post{title: "1", text: "hi"})
-    p2 = TestRepo.insert!(%Post{title: "2", text: "ola"})
-    p3 = TestRepo.insert!(%Post{title: "3", text: "hello"})
+    p1 = TestRepo.insert!(%Post{title: "1"})
+    p2 = TestRepo.insert!(%Post{title: "2"})
+    p3 = TestRepo.insert!(%Post{title: "3"})
 
     %User{id: uid1} = TestRepo.insert!(%User{name: "john"})
     %User{id: uid2} = TestRepo.insert!(%User{name: "mary"})
@@ -193,6 +192,7 @@ defmodule Ecto.Integration.AssocTest do
     assert [0] == TestRepo.all(from(p in Permalink, select: count(p.id)))
   end
 
+  @tag :on_replace_nilify
   test "has_one changeset assoc (on_replace: :nilify)" do
     # Insert new
     changeset =
@@ -231,6 +231,7 @@ defmodule Ecto.Integration.AssocTest do
     assert [2] == TestRepo.all(from(p in Permalink, select: count(p.id)))
   end
 
+  @tag :on_replace_update
   test "has_one changeset assoc (on_replace: :update)" do
     # Insert new
     changeset =
@@ -467,7 +468,7 @@ defmodule Ecto.Integration.AssocTest do
   end
 
   test "many_to_many changeset assoc with self-referential binary_id" do
-    assoc_custom = TestRepo.insert!(%Custom{})
+    assoc_custom = TestRepo.insert!(%Custom{uuid: Ecto.UUID.generate()})
     custom = TestRepo.insert!(%Custom{customs: [assoc_custom]})
 
     custom = Custom |> TestRepo.get!(custom.bid) |> TestRepo.preload(:customs)
@@ -622,7 +623,7 @@ defmodule Ecto.Integration.AssocTest do
     assert post.comments == []
   end
 
-  test "inserting changeset with empty associations" do
+  test "inserting changeset with empty cast associations" do
     changeset =
       %Permalink{}
       |> Ecto.Changeset.cast(%{url: "root", post: nil}, [:url])
@@ -636,6 +637,39 @@ defmodule Ecto.Integration.AssocTest do
       |> Ecto.Changeset.cast_assoc(:comments)
     post = TestRepo.insert!(changeset)
     assert post.comments == []
+  end
+
+  test "inserting changeset with empty put associations" do
+    changeset =
+      %Permalink{}
+      |> Ecto.Changeset.change()
+      |> Ecto.Changeset.put_assoc(:post, nil)
+    permalink = TestRepo.insert!(changeset)
+    assert permalink.post == nil
+
+    changeset =
+      %Post{}
+      |> Ecto.Changeset.change()
+      |> Ecto.Changeset.put_assoc(:comments, [])
+    post = TestRepo.insert!(changeset)
+    assert post.comments == []
+  end
+
+  test "updating changeset with empty cast associations" do
+    post = TestRepo.insert!(%Post{})
+    c1 = TestRepo.insert!(%Comment{post_id: post.id})
+    c2 = TestRepo.insert!(%Comment{post_id: post.id})
+
+    assert TestRepo.all(Comment) == [c1, c2]
+
+    post = TestRepo.get!(from(Post, preload: [:comments]), post.id)
+
+    post
+    |> Ecto.Changeset.change
+    |> Ecto.Changeset.put_assoc(:comments, [])
+    |> TestRepo.update!()
+
+    assert TestRepo.all(Comment) == []
   end
 
   ## Dependent
@@ -671,8 +705,8 @@ defmodule Ecto.Integration.AssocTest do
   end
 
   test "many_to_many assoc on delete deletes all" do
-    p1 = TestRepo.insert!(%Post{title: "1", text: "hi"})
-    p2 = TestRepo.insert!(%Post{title: "2", text: "hello"})
+    p1 = TestRepo.insert!(%Post{title: "1", visits: 1})
+    p2 = TestRepo.insert!(%Post{title: "2", visits: 2})
 
     u1 = TestRepo.insert!(%User{name: "john"})
     u2 = TestRepo.insert!(%User{name: "mary"})

@@ -19,20 +19,21 @@ defmodule Ecto do
       common problems like SQL Injection, while still being composable, allowing
       developers to build queries piece by piece instead of all at once
 
-  In the following sections, we will provide an overview of those components and
-  how they interact with each other. Feel free to access their respective module
-  documentation for more specific examples, options and configuration.
+  Besides the four components above, most developers use Ecto to interact
+  with SQL databases, such as Postgres and MySQL via the
+  [`ecto_sql`](http://hexdocs.pm/ecto_sql) project. `ecto_sql` provides many
+  conveniences for working with SQL databases as well as the ability to version
+  how your database changes through time via
+  [database migrations](https://hexdocs.pm/ecto_sql/Ecto.Adapters.SQL.html#module-migrations).
 
   If you want to quickly check a sample application using Ecto, please check
   the [getting started guide](http://hexdocs.pm/ecto/getting-started.html) and
-  the accompanying sample application.
+  the accompanying sample application. [Ecto's README](https://github.com/elixir-ecto/ecto)
+  also links to other resources.
 
-  After exploring the documentation and guides, consider checking out the
-  ["What's new in Ecto 2.1"](http://pages.plataformatec.com.br/ebook-whats-new-in-ecto-2-0)
-  free ebook to learn more about many features in Ecto 2.1 such as `many_to_many`,
-  schemaless queries, concurrent testing and more. Note the book still largely applies
-  to Ecto 3.0 as the major change in Ecto 3.0 was the removal of the outdated
-  Ecto datetime types in favor of Elixir's Calendar types.
+  In the following sections, we will provide an overview of those components and
+  how they interact with each other. Feel free to access their respective module
+  documentation for more specific examples, options and configuration.
 
   ## Repositories
 
@@ -76,7 +77,7 @@ defmodule Ecto do
 
   ## Schema
 
-  Schemas allows developers to define the shape of their data.
+  Schemas allow developers to define the shape of their data.
   Let's see an example:
 
       defmodule Weather do
@@ -271,13 +272,6 @@ defmodule Ecto do
   developers to completely bypass Ecto queries.
 
   ## Other topics
-
-  ### Ecto and SQL
-
-  One of the most common ways to use Ecto is to interact with databases,
-  such as Postgres and MySQL via [`Ecto.Adapters.SQL`](http://hexdocs.pm/ecto_sql).
-  `Ecto.Adapters.SQL` provides many conveniences for working with SQL
-  databases, including support for database migrations.
 
   ### Associations
 
@@ -606,5 +600,55 @@ defmodule Ecto do
     else
       true
     end
+  end
+
+  @doc """
+  Loads previously dumped `data` in the given `format` into a schema.
+
+  The first argument can be a an embedded schema module, or a map (of types) and
+  determines the return value: a struct or a map, respectively.
+
+  The second argument `data` specifies fields and values that are to be loaded.
+  It can be a map, a keyword list, or a `{fields, values}` tuple. Fields can be
+  atoms or strings.
+
+  The third argument `format` is the format the data has been dumped as. For
+  example, databases may dump embedded to `:json`, this function allows such
+  dumped data to be put back into the schemas.
+
+  Fields that are not present in the schema (or `types` map) are ignored.
+  If any of the values has invalid type, an error is raised.
+
+  Note that if you want to load data into a non-embedded schema that was
+  directly persisted into a given repository, then use `c:Ecto.Repo.load/2`.
+
+  ## Examples
+
+      iex> result = Ecto.Adapters.SQL.query!(MyRepo, "SELECT users.settings FROM users", [])
+      iex> Enum.map(result.rows, fn [settings] -> Ecto.embedded_load(Setting, Jason.decode!(settings), :json) end)
+      [%Setting{...}, ...]
+  """
+  @spec embedded_load(
+              module_or_map :: module | map(),
+              data :: map(),
+              format :: atom()
+            ) :: Ecto.Schema.t() | map()
+  def embedded_load(schema_or_types, data, format) do
+    Ecto.Schema.Loader.unsafe_load(schema_or_types, data, &Ecto.Type.embedded_load(&1, &2, format))
+  end
+
+  @doc """
+  Dumps the given struct defined by an embedded schema.
+
+  This converts the given embedded schema to a map to be serialized
+  with the given format. For example:
+
+      iex> Ecto.embedded_dump(%Post{}, :json)
+      %{title: "hello"}
+
+  """
+  @spec embedded_dump(Ecto.Schema.t(), format :: atom()) :: map()
+  def embedded_dump(%schema{} = data, format) do
+    Ecto.Schema.Loader.safe_dump(data, schema.__schema__(:dump), &Ecto.Type.embedded_dump(&1, &2, format))
   end
 end

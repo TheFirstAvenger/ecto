@@ -16,33 +16,20 @@ defmodule Ecto.Query.PlannerTest do
       field :temp, :string, virtual: true
       field :posted, :naive_datetime
       field :uuid, :binary_id
-      field :special, :boolean
       field :crazy_comment, :string
 
       belongs_to :post, Ecto.Query.PlannerTest.Post
 
       belongs_to :crazy_post, Ecto.Query.PlannerTest.Post,
-        where: {Ecto.Query.PlannerTest.Post, :crazy, []}
+        where: [title: "crazypost"]
 
-      belongs_to :crazy_post_by_parameter, Ecto.Query.PlannerTest.Post,
-        where: {Ecto.Query.PlannerTest.Post, :crazy_by_parameter, []},
+      belongs_to :crazy_post_with_list, Ecto.Query.PlannerTest.Post,
+        where: [title: {:in, ["crazypost1", "crazypost2"]}],
         foreign_key: :crazy_post_id,
         define_field: false
 
       has_many :post_comments, through: [:post, :comments]
       has_many :comment_posts, Ecto.Query.PlannerTest.CommentPost
-    end
-
-    def crazy() do
-      dynamic([row], row.crazy_comment == "crazy")
-    end
-
-    def crazy_by_parameter() do
-      dynamic([row], row.crazy_comment == ^"crazy")
-    end
-
-    def special() do
-      dynamic([row], row.special)
     end
   end
 
@@ -52,7 +39,8 @@ defmodule Ecto.Query.PlannerTest do
     schema "comment_posts" do
       belongs_to :comment, Comment
       belongs_to :post, Post
-      belongs_to :special_comment, Comment, where: {Comment, :special, []}
+      belongs_to :special_comment, Comment, where: [text: nil]
+      belongs_to :special_long_comment, Comment, where: [text: {:fragment, "LEN(?) > 100"}]
 
       field :deleted, :boolean
     end
@@ -62,10 +50,27 @@ defmodule Ecto.Query.PlannerTest do
     end
   end
 
+  defmodule Author do
+    use Ecto.Schema
+
+    embedded_schema do
+      field :name, :string
+    end
+  end
+
+  defmodule PostMeta do
+    use Ecto.Schema
+
+    embedded_schema do
+      field :slug, :string
+      embeds_one :author, Author
+    end
+  end
+
   defmodule Post do
     use Ecto.Schema
 
-    @primary_key {:id, Custom.Permalink, []}
+    @primary_key {:id, CustomPermalink, []}
     @schema_prefix "my_prefix"
     schema "posts" do
       field :title, :string, source: :post_title
@@ -73,28 +78,24 @@ defmodule Ecto.Query.PlannerTest do
       field :code, :binary
       field :posted, :naive_datetime
       field :visits, :integer
-      field :links, {:array, Custom.Permalink}
-      field :crazy_post, :string
+      field :links, {:array, CustomPermalink}
+      field :prefs, {:map, :string}
+      field :payload, :map, load_in_query: false
+
+      embeds_one :meta, PostMeta
+      embeds_many :metas, PostMeta
+
       has_many :comments, Ecto.Query.PlannerTest.Comment
       has_many :extra_comments, Ecto.Query.PlannerTest.Comment
-      has_many :special_comments, Ecto.Query.PlannerTest.Comment, where: {Ecto.Query.PlannerTest.Comment, :special, []}
-      many_to_many :crazy_comments, Comment, join_through: CommentPost, where: {Comment, :crazy, []}
-      many_to_many :crazy_comments_by_parameter, Comment, join_through: CommentPost, where: {Comment, :crazy_by_parameter, []}
-
-      many_to_many :shared_special_comments, Comment, join_through: CommentPost, where: {Comment, :special, []}, join_through_where: {CommentPost, :inactive, []}
-    end
-
-    def crazy() do
-      Ecto.Query.dynamic([row], row.crazy_post == "crazy")
-    end
-
-    def crazy_by_parameter() do
-      Ecto.Query.dynamic([row], row.crazy_post == ^"crazy")
+      has_many :special_comments, Ecto.Query.PlannerTest.Comment, where: [text: {:not, nil}]
+      many_to_many :crazy_comments, Comment, join_through: CommentPost, where: [text: "crazycomment"]
+      many_to_many :crazy_comments_with_list, Comment, join_through: CommentPost, where: [text: {:in, ["crazycomment1", "crazycomment2"]}], join_where: [deleted: true]
+      many_to_many :crazy_comments_without_schema, Comment, join_through: "comment_posts", join_where: [deleted: true]
     end
   end
 
   defp plan(query, operation \\ :all) do
-    Planner.plan(query, operation, Ecto.TestAdapter, 0)
+    Planner.plan(query, operation, Ecto.TestAdapter)
   end
 
   defp normalize(query, operation \\ :all) do
@@ -104,12 +105,12 @@ defmodule Ecto.Query.PlannerTest do
   defp normalize_with_params(query, operation \\ :all) do
     {query, params, _key} = plan(query, operation)
 
-    {query, _} =
+    {query, select} =
       query
       |> Planner.ensure_select(operation == :all)
       |> Planner.normalize(operation, Ecto.TestAdapter, 0)
 
-    {query, params}
+    {query, params, select}
   end
 
   defp select_fields(fields, ix) do
@@ -119,21 +120,28 @@ defmodule Ecto.Query.PlannerTest do
   end
 
   test "plan: merges all parameters" do
+    union = from p in Post, select: {p.title, ^"union"}
+    subquery = from Comment, where: [text: ^"subquery"]
+
     query =
       from p in Post,
-        select: {p.title, ^"0"},
-        join: c in Comment,
-        on: c.text == ^"1",
+        select: {p.title, ^"select"},
+        join: c in subquery(subquery),
+        on: c.text == ^"join",
         left_join: d in assoc(p, :comments),
-        where: p.title == ^"2",
-        group_by: p.title == ^"3",
-        having: p.title == ^"4",
-        order_by: [asc: fragment("?", ^"5")],
-        limit: ^6,
-        offset: ^7
+        union_all: ^union,
+        windows: [foo: [partition_by: fragment("?", ^"windows")]],
+        where: p.title == ^"where",
+        group_by: p.title == ^"group_by",
+        having: p.title == ^"having",
+        order_by: [asc: fragment("?", ^"order_by")],
+        limit: ^0,
+        offset: ^1
 
     {_query, params, _key} = plan(query)
-    assert params == ["0", "1", "2", "3", "4", "5", 6, 7]
+    assert params ==
+             ["select", "subquery", "join", "where", "group_by", "having", "windows"] ++
+               ["union", "order_by", 0, 1]
   end
 
   test "plan: checks from" do
@@ -151,7 +159,7 @@ defmodule Ecto.Query.PlannerTest do
     end
 
     assert Exception.message(exception) =~ "value `1` in `where` cannot be cast to type :string"
-    assert Exception.message(exception) =~ "where: p.title == ^1"
+    assert Exception.message(exception) =~ "where: p0.title == ^1"
   end
 
   test "plan: raises readable error on dynamic expressions/keyword lists" do
@@ -293,37 +301,31 @@ defmodule Ecto.Query.PlannerTest do
     assert {{"posts", _, _}, {"comments", _, _}} = query.sources
     assert [join] = query.joins
     assert join.ix == 1
-    assert Macro.to_string(join.on.expr) == "&1.special() and &1.post_id() == &0.id()"
-
-    query = from(p in Post, left_join: assoc(p, :shared_special_comments)) |> plan |> elem(0)
-
-    assert {{"posts", _, _}, {"comments", _, _}, {"comment_posts", _, _}} = query.sources
-    assert [join1, join2] = query.joins
-    assert Enum.map(query.joins, & &1.ix) == [2, 1]
-    assert Macro.to_string(join1.on.expr) == "&2.deleted() and &2.post_id() == &0.id()"
-    assert Macro.to_string(join2.on.expr) == "&1.special() and &2.comment_id() == &1.id()"
+    assert Macro.to_string(join.on.expr) =~
+             ~r"&1.post_id\(\) == &0.id\(\) and not[\s\(]is_nil\(&1.text\(\)\)\)?"
   end
 
   test "plan: nested joins associations with custom queries" do
     query = from(p in Post,
-                   join: c in assoc(p, :special_comments),
-                   join: p2 in assoc(c, :post),
-                   join: c1 in assoc(p, :shared_special_comments),
+                   join: c1 in assoc(p, :special_comments),
+                   join: p2 in assoc(c1, :post),
                    join: cp in assoc(c1, :comment_posts),
-                   join: c2 in assoc(cp, :special_comment))
+                   join: c2 in assoc(cp, :special_comment),
+                   join: c3 in assoc(cp, :special_long_comment))
                    |> plan
                    |> elem(0)
 
-    assert [join1, join2, join3, join4, join5, join6] = query.joins
-    assert {{"posts", _, _}, {"comments", _, _}, {"posts", _, _}, {"comments", _, _},
-            {"comment_posts", _, _}, {"comments", _, _}, {"comment_posts", _, _}} = query.sources
+    assert [join1, join2, join3, join4, join5] = query.joins
+    assert {{"posts", _, _}, {"comments", _, _}, {"posts", _, _},
+            {"comment_posts", _, _}, {"comments", _, _}, {"comments", _, _}} = query.sources
 
-    assert Macro.to_string(join1.on.expr) == "&1.special() and &1.post_id() == &0.id()"
+    assert Macro.to_string(join1.on.expr) =~
+           ~r"&1.post_id\(\) == &0.id\(\) and not[\s\(]is_nil\(&1.text\(\)\)\)?"
     assert Macro.to_string(join2.on.expr) == "&2.id() == &1.post_id()"
-    assert Macro.to_string(join3.on.expr) == "&6.deleted() and &6.post_id() == &0.id()"
-    assert Macro.to_string(join4.on.expr) == "&3.special() and &6.comment_id() == &3.id()"
-    assert Macro.to_string(join5.on.expr) == "&4.comment_id() == &3.id()"
-    assert Macro.to_string(join6.on.expr) == "&5.special() and &5.id() == &4.special_comment_id()"
+    assert Macro.to_string(join3.on.expr) == "&3.comment_id() == &1.id()"
+    assert Macro.to_string(join4.on.expr) == "&4.id() == &3.special_comment_id() and is_nil(&4.text())"
+    assert Macro.to_string(join5.on.expr) ==
+           "&5.id() == &3.special_long_comment_id() and fragment({:raw, \"LEN(\"}, {:expr, &5.text()}, {:raw, \") > 100\"})"
   end
 
   test "plan: cannot associate without schema" do
@@ -343,9 +345,24 @@ defmodule Ecto.Query.PlannerTest do
     end
   end
 
+  test "plan: handles specific param type-casting" do
+    value = NaiveDateTime.utc_now()
+    {_, params, _} = from(p in Post, where: p.posted > datetime_add(^value, 1, "second")) |> plan()
+    assert params == [value]
+
+    value = DateTime.utc_now()
+    {_, params, _} = from(p in Post, where: p.posted > datetime_add(^value, 1, "second")) |> plan()
+    assert params == [value]
+
+    value = ~N[2010-04-17 14:00:00]
+    {_, params, _} =
+      from(p in Post, where: p.posted > datetime_add(^"2010-04-17 14:00:00", 1, "second")) |> plan()
+    assert params == [value]
+  end
+
   test "plan: generates a cache key" do
     {_query, _params, key} = plan(from(Post, []))
-    assert key == [:all, 0, {"posts", Post, 11832799, "my_prefix"}]
+    assert key == [:all, {"posts", Post, 57100494, "my_prefix"}]
 
     query =
       from(
@@ -361,18 +378,34 @@ defmodule Ecto.Query.PlannerTest do
       )
 
     {_query, _params, key} = plan(%{query | prefix: "foo"})
-    assert key == [:all, 0,
+    assert key == [:all,
                    {:lock, "foo"},
                    {:prefix, "foo"},
                    {:where, [{:and, {:is_nil, [], [nil]}}, {:or, {:is_nil, [], [nil]}}]},
-                   {:join, [{:inner, {"comments", Comment, 47313942, "world"}, true}]},
-                   {"posts", Post, 11832799, "hello"},
+                   {:join, [{:inner, {"comments", Comment, 38292156, "world"}, true}]},
+                   {"posts", Post, 57100494, "hello"},
                    {:select, 1}]
   end
 
   test "plan: generates a cache key for in based on the adapter" do
     query = from(p in Post, where: p.id in ^[1, 2, 3])
-    {_query, _params, key} = Planner.plan(query, :all, Ecto.TestAdapter, 0)
+    {_query, _params, key} = Planner.plan(query, :all, Ecto.TestAdapter)
+    assert key == :nocache
+  end
+
+  test "plan: combination with uncacheable queries are uncacheable" do
+    query1 =
+      Post
+      |> where([p], p.id in ^[1, 2, 3])
+      |> select([p], p.id)
+
+    query2 =
+      Post
+      |> where([p], p.id in [1, 2])
+      |> select([p], p.id)
+      |> distinct(true)
+
+    {_, _, key} = query1 |> union_all(^query2) |> Planner.plan(:all, Ecto.TestAdapter)
     assert key == :nocache
   end
 
@@ -398,6 +431,36 @@ defmodule Ecto.Query.PlannerTest do
     assert query.sources == {{"posts", Post, "local"}}
 
     # Schema prefix in join
+    {query, _, _} = from(c in Comment, join: Post) |> plan()
+    assert query.sources == {{"comments", Comment, nil}, {"posts", Post, "my_prefix"}}
+
+    {query, _, _} = from(c in Comment, join: Post) |> Map.put(:prefix, "global") |> plan()
+    assert query.sources == {{"comments", Comment, "global"}, {"posts", Post, "my_prefix"}}
+
+    {query, _, _} = from(c in Comment, join: Post, prefix: "local") |> Map.put(:prefix, "global") |> plan()
+    assert query.sources == {{"comments", Comment, "global"}, {"posts", Post, "local"}}
+
+    # Schema prefix in query join
+    {query, _, _} = from(p in Post, join: ^from(c in Comment)) |> plan()
+    assert query.sources == {{"posts", Post, "my_prefix"}, {"comments", Comment, nil}}
+
+    {query, _, _} = from(p in Post, join: ^from(c in Comment)) |> Map.put(:prefix, "global") |> plan()
+    assert query.sources == {{"posts", Post, "my_prefix"}, {"comments", Comment, "global"}}
+
+    {query, _, _} = from(p in Post, join: ^from(c in Comment), prefix: "local") |> Map.put(:prefix, "global") |> plan()
+    assert query.sources == {{"posts", Post, "my_prefix"}, {"comments", Comment, "local"}}
+
+    # No schema prefix in assoc join
+    {query, _, _} = from(c in Comment, join: assoc(c, :comment_posts)) |> plan()
+    assert query.sources == {{"comments", Comment, nil}, {"comment_posts", CommentPost, nil}}
+
+    {query, _, _} = from(c in Comment, join: assoc(c, :comment_posts)) |> Map.put(:prefix, "global") |> plan()
+    assert query.sources == {{"comments", Comment, "global"}, {"comment_posts", CommentPost, "global"}}
+
+    {query, _, _} = from(c in Comment, join: assoc(c, :comment_posts), prefix: "local") |> Map.put(:prefix, "global") |> plan()
+    assert query.sources == {{"comments", Comment, "global"}, {"comment_posts", CommentPost, "local"}}
+
+    # Schema prefix in assoc join
     {query, _, _} = from(c in Comment, join: assoc(c, :post)) |> plan()
     assert query.sources == {{"comments", Comment, nil}, {"posts", Post, "my_prefix"}}
 
@@ -406,12 +469,229 @@ defmodule Ecto.Query.PlannerTest do
 
     {query, _, _} = from(c in Comment, join: assoc(c, :post), prefix: "local") |> Map.put(:prefix, "global") |> plan()
     assert query.sources == {{"comments", Comment, "global"}, {"posts", Post, "local"}}
+
+    # Schema prefix for assoc many-to-many joins
+    {query, _, _} = from(c in Post, join: assoc(c, :crazy_comments)) |> plan()
+    assert query.sources == {{"posts", Post, "my_prefix"}, {"comments", Comment, nil}, {"comment_posts", CommentPost, nil}}
+
+    {query, _, _} = from(c in Post, join: assoc(c, :crazy_comments)) |> Map.put(:prefix, "global") |> plan()
+    assert query.sources == {{"posts", Post, "my_prefix"}, {"comments", Comment, "global"}, {"comment_posts", CommentPost, "global"}}
+
+    {query, _, _} = from(c in Post, join: assoc(c, :crazy_comments), prefix: "local") |> Map.put(:prefix, "global") |> plan()
+    assert query.sources == {{"posts", Post, "my_prefix"}, {"comments", Comment, "local"}, {"comment_posts", CommentPost, "local"}}
+
+    # Schema prefix for assoc many-to-many joins (when join_through is a table name)
+    {query, _, _} = from(c in Post, join: assoc(c, :crazy_comments_without_schema)) |> plan()
+    assert query.sources == {{"posts", Post, "my_prefix"}, {"comments", Comment, nil}, {"comment_posts", nil, nil}}
+
+    {query, _, _} = from(c in Post, join: assoc(c, :crazy_comments_without_schema)) |> Map.put(:prefix, "global") |> plan()
+    assert query.sources == {{"posts", Post, "my_prefix"}, {"comments", Comment, "global"}, {"comment_posts", nil, "global"}}
+
+    {query, _, _} = from(c in Post, join: assoc(c, :crazy_comments_without_schema), prefix: "local") |> Map.put(:prefix, "global") |> plan()
+    assert query.sources == {{"posts", Post, "my_prefix"}, {"comments", Comment, "local"}, {"comment_posts", nil, "local"}}
+
+    # Schema prefix for assoc has through
+    {query, _, _} = from(c in Comment, join: assoc(c, :post_comments)) |> Map.put(:prefix, "global") |> plan()
+    assert query.sources == {{"comments", Comment, "global"}, {"comments", Comment, "global"}, {"posts", Ecto.Query.PlannerTest.Post, "my_prefix"}}
+
+    {query, _, _} = from(c in Comment, join: assoc(c, :post_comments), prefix: "local") |> Map.put(:prefix, "global") |> plan()
+    assert query.sources == {{"comments", Comment, "global"}, {"comments", Comment, "local"}, {"posts", Ecto.Query.PlannerTest.Post, "local"}}
   end
 
-  test "prepare: prepare combination queries" do
-    {%{combinations: [{_, query}]}, _, _} = from(c in Comment, union: from(c in Comment)) |> plan()
+  test "plan: combination queries" do
+    {%{combinations: [{_, query}]}, _, cache} = from(c in Comment, union: ^from(c in Comment)) |> plan()
     assert query.sources == {{"comments", Comment, nil}}
     assert %Ecto.Query.SelectExpr{expr: {:&, [], [0]}} = query.select
+    assert [:all, {:union, _}, _] = cache
+
+    {%{combinations: [{_, query}]}, _, cache} = from(c in Comment, union: ^from(c in Comment, where: c in ^[1, 2, 3])) |> plan()
+    assert query.sources == {{"comments", Comment, nil}}
+    assert %Ecto.Query.SelectExpr{expr: {:&, [], [0]}} = query.select
+    assert :nocache = cache
+  end
+
+  test "plan: normalizes prefixes for combinations" do
+    # No schema prefix in from
+    assert {%{combinations: [{_, union_query}]} = query, _, _} = from(Comment,  union: ^from(Comment)) |> plan()
+    assert query.sources == {{"comments", Comment, nil}}
+    assert union_query.sources == {{"comments", Comment, nil}}
+
+    assert {%{combinations: [{_, union_query}]} = query, _, _} = from(Comment, union: ^from(Comment)) |> Map.put(:prefix, "global") |> plan()
+    assert query.sources == {{"comments", Comment, "global"}}
+    assert union_query.sources == {{"comments", Comment, "global"}}
+
+    assert {%{combinations: [{_, union_query}]} = query, _, _} = from(Comment, prefix: "local", union: ^from(Comment)) |> plan()
+    assert query.sources == {{"comments", Comment, "local"}}
+    assert union_query.sources == {{"comments", Comment, nil}}
+
+    assert {%{combinations: [{_, union_query}]} = query, _, _} = from(Comment, prefix: "local", union: ^from(Comment)) |> Map.put(:prefix, "global") |> plan()
+    assert query.sources == {{"comments", Comment, "local"}}
+    assert union_query.sources == {{"comments", Comment, "global"}}
+
+    assert {%{combinations: [{_, union_query}]} = query, _, _} = from(Comment, prefix: "local", union: ^(from(Comment) |> Map.put(:prefix, "union"))) |> Map.put(:prefix, "global") |> plan()
+    assert query.sources == {{"comments", Comment, "local"}}
+    assert union_query.sources == {{"comments", Comment, "union"}}
+
+    # With schema prefix
+    assert {%{combinations: [{_, union_query}]} = query, _, _} = from(Post, union: ^from(p in Post)) |> plan()
+    assert query.sources == {{"posts", Post, "my_prefix"}}
+    assert union_query.sources == {{"posts", Post, "my_prefix"}}
+
+    assert {%{combinations: [{_, union_query}]} = query, _, _} = from(Post, union: ^from(Post)) |> Map.put(:prefix, "global") |> plan()
+    assert query.sources == {{"posts", Post, "my_prefix"}}
+    assert union_query.sources == {{"posts", Post, "my_prefix"}}
+
+    assert {%{combinations: [{_, union_query}]} = query, _, _} = from(Post, prefix: "local", union: ^from(Post)) |> plan()
+    assert query.sources == {{"posts", Post, "local"}}
+    assert union_query.sources == {{"posts", Post, "my_prefix"}}
+
+    assert {%{combinations: [{_, union_query}]} = query, _, _} = from(Post, prefix: "local", union: ^from(Post)) |> Map.put(:prefix, "global") |> plan()
+    assert query.sources == {{"posts", Post, "local"}}
+    assert union_query.sources == {{"posts", Post, "my_prefix"}}
+
+    # Deep-nested unions
+    assert {%{combinations: [{_, upper_level_union_query}]} = query, _, _} = from(Comment, union: ^from(Comment, union: ^from(Comment))) |> plan()
+    assert %{combinations: [{_, deeper_level_union_query}]} = upper_level_union_query
+    assert query.sources == {{"comments", Comment, nil}}
+    assert upper_level_union_query.sources == {{"comments", Comment, nil}}
+    assert deeper_level_union_query.sources == {{"comments", Comment, nil}}
+
+    assert {%{combinations: [{_, upper_level_union_query}]} = query, _, _} = from(Comment, union: ^from(Comment, union: ^from(Comment))) |> Map.put(:prefix, "global") |> plan()
+    assert %{combinations: [{_, deeper_level_union_query}]} = upper_level_union_query
+    assert query.sources == {{"comments", Comment, "global"}}
+    assert upper_level_union_query.sources == {{"comments", Comment, "global"}}
+    assert deeper_level_union_query.sources == {{"comments", Comment, "global"}}
+
+    assert {%{combinations: [{_, upper_level_union_query}]} = query, _, _} = from(Comment, prefix: "local", union: ^from(Comment, union: ^from(Comment))) |> plan()
+    assert %{combinations: [{_, deeper_level_union_query}]} = upper_level_union_query
+    assert query.sources == {{"comments", Comment, "local"}}
+    assert upper_level_union_query.sources == {{"comments", Comment, nil}}
+    assert deeper_level_union_query.sources == {{"comments", Comment, nil}}
+
+    assert {%{combinations: [{_, upper_level_union_query}]} = query, _, _} = from(Comment, prefix: "local", union: ^from(Comment, union: ^from(Comment))) |> Map.put(:prefix, "global") |> plan()
+    assert %{combinations: [{_, deeper_level_union_query}]} = upper_level_union_query
+    assert query.sources == {{"comments", Comment, "local"}}
+    assert upper_level_union_query.sources == {{"comments", Comment, "global"}}
+    assert deeper_level_union_query.sources == {{"comments", Comment, "global"}}
+  end
+
+  describe "plan: CTEs" do
+    test "with uncacheable queries are uncacheable" do
+      {_, _, cache} =
+        Comment
+        |> with_cte("cte", as: ^from(c in Comment, where: c.id in ^[1, 2, 3]))
+        |> plan()
+
+      assert cache == :nocache
+    end
+
+    test "on all" do
+      {%{with_ctes: with_expr}, _, cache} =
+        Comment
+        |> with_cte("cte", as: ^from(c in Comment))
+        |> plan()
+      %{queries: [{"cte", query}]} = with_expr
+      assert query.sources == {{"comments", Comment, nil}}
+      assert %Ecto.Query.SelectExpr{expr: {:&, [], [0]}} = query.select
+      assert [
+        :all,
+        {"comments", Comment, _, nil},
+        {:non_recursive_cte, "cte", [{"comments", Comment, _, nil}, {:select, {:&, _, [0]}}]}
+      ] = cache
+
+      {%{with_ctes: with_expr}, _, cache} =
+        Comment
+        |> with_cte("cte", as: ^from(c in Comment, where: c in ^[1, 2, 3]))
+        |> plan()
+      %{queries: [{"cte", query}]} = with_expr
+      assert query.sources == {{"comments", Comment, nil}}
+      assert %Ecto.Query.SelectExpr{expr: {:&, [], [0]}} = query.select
+      assert :nocache = cache
+
+      {%{with_ctes: with_expr}, _, cache} =
+        Comment
+        |> recursive_ctes(true)
+        |> with_cte("cte", as: fragment("SELECT * FROM comments WHERE id = ?", ^123))
+        |> plan()
+      %{queries: [{"cte", query_expr}]} = with_expr
+      expr = {:fragment, [], [raw: "SELECT * FROM comments WHERE id = ", expr: {:^, [], [0]}, raw: ""]}
+      assert expr == query_expr.expr
+      assert [:all, {"comments", Comment, _, nil}, {:recursive_cte, "cte", ^expr}] = cache
+    end
+
+    test "on update_all" do
+      recent_comments =
+        from(c in Comment,
+          order_by: [desc: c.posted],
+          limit: ^500,
+          select: [:id]
+        )
+
+      {%{with_ctes: with_expr}, [500, "text"], cache} =
+        Comment
+        |> with_cte("recent_comments", as: ^recent_comments)
+        |> join(:inner, [c], r in "recent_comments", on: c.id == r.id)
+        |> update(set: [text: ^"text"])
+        |> select([c, r], c)
+        |> plan(:update_all)
+
+      %{queries: [{"recent_comments", cte}]} = with_expr
+      assert {{"comments", Comment, nil}} = cte.sources
+      assert %{expr: {:^, [], [0]}, params: [{500, :integer}]} = cte.limit
+
+      assert [:update_all, _, _, _, _, {:non_recursive_cte, "recent_comments", cte_cache}] = cache
+      assert [
+               {:limit, {:^, [], [0]}},
+               {:order_by, [[desc: _]]},
+               {"comments", Comment, _, nil},
+               {:select, {:&, [], [0]}}
+             ] = cte_cache
+    end
+
+    test "on delete_all" do
+      recent_comments =
+        from(c in Comment,
+          order_by: [desc: c.posted],
+          limit: ^500,
+          select: [:id]
+        )
+
+      {%{with_ctes: with_expr}, [500, "text"], cache} =
+        Comment
+        |> with_cte("recent_comments", as: ^recent_comments)
+        |> join(:inner, [c], r in "recent_comments", on: c.id == r.id and c.text == ^"text")
+        |> select([c, r], c)
+        |> plan(:delete_all)
+
+      %{queries: [{"recent_comments", cte}]} = with_expr
+      assert {{"comments", Comment, nil}} = cte.sources
+      assert %{expr: {:^, [], [0]}, params: [{500, :integer}]} = cte.limit
+
+      assert [:delete_all, _, _, _, {:non_recursive_cte, "recent_comments", cte_cache}] = cache
+      assert [
+               {:limit, {:^, [], [0]}},
+               {:order_by, [[desc: _]]},
+               {"comments", Comment, _, nil},
+               {:select, {:&, [], [0]}}
+             ] = cte_cache
+    end
+
+    test "prefixes" do
+      {%{with_ctes: with_expr} = query, _, _} = Comment |> with_cte("cte", as: ^from(c in Comment)) |> plan()
+      %{queries: [{"cte", cte_query}]} = with_expr
+      assert query.sources == {{"comments", Comment, nil}}
+      assert cte_query.sources == {{"comments", Comment, nil}}
+
+      {%{with_ctes: with_expr} = query, _, _} = Comment |> with_cte("cte", as: ^from(c in Comment)) |> Map.put(:prefix, "global") |> plan()
+      %{queries: [{"cte", cte_query}]} = with_expr
+      assert query.sources == {{"comments", Comment, "global"}}
+      assert cte_query.sources == {{"comments", Comment, "global"}}
+
+      {%{with_ctes: with_expr} = query, _, _} = Comment |> with_cte("cte", as: ^(from(c in Comment) |> Map.put(:prefix, "cte"))) |> Map.put(:prefix, "global") |> plan()
+      %{queries: [{"cte", cte_query}]} = with_expr
+      assert query.sources == {{"comments", Comment, "global"}}
+      assert cte_query.sources == {{"comments", Comment, "cte"}}
+    end
   end
 
   test "normalize: validates literal types" do
@@ -425,20 +705,20 @@ defmodule Ecto.Query.PlannerTest do
   end
 
   test "normalize: tagged types" do
-    {query, params} = from(Post, []) |> select([p], type(^"1", :integer))
-                                     |> normalize_with_params
+    {query, params, _select} = from(Post, []) |> select([p], type(^"1", :integer))
+                                              |> normalize_with_params
     assert query.select.expr ==
            %Ecto.Query.Tagged{type: :integer, value: {:^, [], [0]}, tag: :integer}
     assert params == [1]
 
-    {query, params} = from(Post, []) |> select([p], type(^"1", Custom.Permalink))
-                                     |> normalize_with_params
+    {query, params, _select} = from(Post, []) |> select([p], type(^"1", CustomPermalink))
+                                              |> normalize_with_params
     assert query.select.expr ==
-           %Ecto.Query.Tagged{type: :id, value: {:^, [], [0]}, tag: Custom.Permalink}
+           %Ecto.Query.Tagged{type: :id, value: {:^, [], [0]}, tag: CustomPermalink}
     assert params == [1]
 
-    {query, params} = from(Post, []) |> select([p], type(^"1", p.visits))
-                                     |> normalize_with_params
+    {query, params, _select} = from(Post, []) |> select([p], type(^"1", p.visits))
+                                              |> normalize_with_params
     assert query.select.expr ==
            %Ecto.Query.Tagged{type: :integer, value: {:^, [], [0]}, tag: :integer}
     assert params == [1]
@@ -448,22 +728,84 @@ defmodule Ecto.Query.PlannerTest do
     end
   end
 
-  test "normalize: assoc join with wheres that have tagged types" do
-    {_query, params} =
+  test "normalize: late bindings with as" do
+    query = from(Post, as: :posts, where: as(:posts).code == ^123) |> normalize()
+    assert Macro.to_string(hd(query.wheres).expr) == "&0.code() == ^0"
+
+    assert_raise Ecto.QueryError, ~r/could not find named binding `as\(:posts\)`/, fn ->
+      from(Post, where: as(:posts).code == ^123) |> normalize()
+    end
+  end
+
+  test "normalize: late parent bindings with as" do
+    child = from(c in Comment, where: parent_as(:posts).posted == c.posted)
+    query = from(Post, as: :posts, join: c in subquery(child)) |> normalize()
+    assert Macro.to_string(hd(hd(query.joins).source.query.wheres).expr) == "parent_as(&0).posted() == &0.posted()"
+
+    assert_raise Ecto.SubQueryError, ~r/could not find named binding `parent_as\(:posts\)`/, fn ->
+      from(Post, join: c in subquery(child)) |> normalize()
+    end
+
+    assert_raise Ecto.QueryError, ~r/`parent_as\(:posts\)` can only be used in subqueries/, fn ->
+      from(Post, where: parent_as(:posts).code == ^123) |> normalize()
+    end
+  end
+
+  test "normalize: assoc join with wheres that have regular filters" do
+    # Mixing both has_many and many_to_many
+    {_query, params, _select} =
       from(post in Post,
         join: comment in assoc(post, :crazy_comments),
         join: post in assoc(comment, :crazy_post)) |> normalize_with_params()
 
-    assert(params == [])
+    assert params == ["crazycomment", "crazypost"]
   end
 
-  test "normalize: assoc join with wheres that have parameters" do
-    {_query, params} =
-      from(post in Post,
-        join: comment in assoc(post, :crazy_comments_by_parameter),
-        join: post in assoc(comment, :crazy_post_by_parameter)) |> normalize_with_params()
+  test "normalize: has_many assoc join with wheres" do
+    {query, params, _select} =
+      from(comment in Comment, join: post in assoc(comment, :crazy_post_with_list)) |> normalize_with_params()
 
-    assert(params == ["crazy", "crazy"])
+    assert inspect(query) =~ "join: p1 in Ecto.Query.PlannerTest.Post, on: p1.id == c0.crazy_post_id and p1.post_title in ^..."
+    assert params == ["crazypost1", "crazypost2"]
+
+    {query, params, _} =
+      Ecto.assoc(%Comment{crazy_post_id: 1}, :crazy_post_with_list)
+      |> normalize_with_params()
+
+    assert inspect(query) =~ "where: p0.id == ^... and p0.post_title in ^..."
+    assert params == [1, "crazypost1", "crazypost2"]
+  end
+
+  test "normalize: many_to_many assoc join with schema and wheres" do
+    {query, params, _select} =
+      from(post in Post, join: comment in assoc(post, :crazy_comments_with_list)) |> normalize_with_params()
+
+    assert inspect(query) =~ "join: c1 in Ecto.Query.PlannerTest.Comment, on: c2.comment_id == c1.id and c1.text in ^... and c2.deleted == ^..."
+    assert params == ["crazycomment1", "crazycomment2", true]
+
+    {query, params, _} =
+      Ecto.assoc(%Post{id: 1}, :crazy_comments_with_list)
+      |> normalize_with_params()
+
+    assert inspect(query) =~ "join: c2 in Ecto.Query.PlannerTest.CommentPost, on: c2.post_id == p1.id and c2.deleted == ^..."
+    assert inspect(query) =~ "where: c2.comment_id == c0.id and c0.text in ^..."
+    assert params ==  [1, true, "crazycomment1", "crazycomment2"]
+  end
+
+  test "normalize: many_to_many assoc join without schema and wheres" do
+    {query, params, _select} =
+      from(post in Post, join: comment in assoc(post, :crazy_comments_without_schema)) |> normalize_with_params()
+
+    assert inspect(query) =~ "join: c1 in Ecto.Query.PlannerTest.Comment, on: c2.comment_id == c1.id and c2.deleted == ^..."
+    assert params == [true]
+
+    {query, params, _} =
+      Ecto.assoc(%Post{id: 1}, :crazy_comments_without_schema)
+      |> normalize_with_params()
+
+    assert inspect(query) =~ "join: c2 in \"comment_posts\", on: c2.post_id == p1.id and c2.deleted == ^..."
+    assert inspect(query) =~ "where: c2.comment_id == c0.id"
+    assert params ==  [1, true]
   end
 
   test "normalize: dumps in query expressions" do
@@ -497,25 +839,85 @@ defmodule Ecto.Query.PlannerTest do
     end
   end
 
+  test "normalize: validate fields in json_extract_path/2" do
+    query = from(Post, []) |> select([p], p.meta["slug"])
+    normalize(query)
+
+    query = from(Post, []) |> select([p], p.meta["author"])
+    normalize(query)
+
+    query = from(Post, []) |> select([p], p.meta["author"]["name"])
+    normalize(query)
+
+    query = from(Post, []) |> select([p], p.metas[0]["slug"])
+    normalize(query)
+
+    query = from(Post, []) |> select([p], p.payload["unknown_field"])
+    normalize(query)
+
+    query = from(Post, []) |> select([p], p.prefs["unknown_field"])
+    normalize(query)
+
+    query = from(p in "posts") |> select([p], p.meta["slug"])
+    normalize(query)
+
+    query = from(p  in "posts") |> select([p], p.meta["unknown_field"])
+    normalize(query)
+
+    query = from(p  in "posts") |> select([p], p.meta["author"]["unknown_field"])
+    normalize(query)
+
+    query = from(p  in "posts") |> select([p], p.metas["not_index"])
+    normalize(query)
+
+    query = from(p  in "posts") |> select([p], p.metas["not_index"]["unknown_field"])
+    normalize(query)
+
+    assert_raise RuntimeError, "expected field `title` to be an embed or a map, got: `:string`", fn ->
+      query = from(Post, []) |> select([p], p.title["foo"])
+      normalize(query)
+    end
+
+    assert_raise RuntimeError, "field `unknown_field` does not exist in Ecto.Query.PlannerTest.PostMeta", fn ->
+      query = from(Post, []) |> select([p], p.meta["unknown_field"])
+      normalize(query)
+    end
+
+    assert_raise RuntimeError, "field `0` does not exist in Ecto.Query.PlannerTest.PostMeta", fn ->
+      query = from(Post, []) |> select([p], p.meta[0])
+      normalize(query)
+    end
+
+    assert_raise RuntimeError, "field `unknown_field` does not exist in Ecto.Query.PlannerTest.Author", fn ->
+      query = from(Post, []) |> select([p], p.meta["author"]["unknown_field"])
+      normalize(query)
+    end
+
+    assert_raise RuntimeError, "cannot use `not_index` to refer to an item in `embeds_many`", fn ->
+      query = from(Post, []) |> select([p], p.metas["not_index"])
+      normalize(query)
+    end
+  end
+
   test "normalize: flattens and expands right side of in expressions" do
-    {query, params} = where(Post, [p], p.id in [1, 2, 3]) |> normalize_with_params()
+    {query, params, _select} = where(Post, [p], p.id in [1, 2, 3]) |> normalize_with_params()
     assert Macro.to_string(hd(query.wheres).expr) == "&0.id() in [1, 2, 3]"
     assert params == []
 
-    {query, params} = where(Post, [p], p.id in [^1, 2, ^3]) |> normalize_with_params()
+    {query, params, _select} = where(Post, [p], p.id in [^1, 2, ^3]) |> normalize_with_params()
     assert Macro.to_string(hd(query.wheres).expr) == "&0.id() in [^0, 2, ^1]"
     assert params == [1, 3]
 
-    {query, params} = where(Post, [p], p.id in ^[]) |> normalize_with_params()
+    {query, params, _select} = where(Post, [p], p.id in ^[]) |> normalize_with_params()
     assert Macro.to_string(hd(query.wheres).expr) == "&0.id() in ^(0, 0)"
     assert params == []
 
-    {query, params} = where(Post, [p], p.id in ^[1, 2, 3]) |> normalize_with_params()
+    {query, params, _select} = where(Post, [p], p.id in ^[1, 2, 3]) |> normalize_with_params()
     assert Macro.to_string(hd(query.wheres).expr) == "&0.id() in ^(0, 3)"
     assert params == [1, 2, 3]
 
-    {query, params} = where(Post, [p], p.title == ^"foo" and p.id in ^[1, 2, 3] and
-                                       p.title == ^"bar") |> normalize_with_params()
+    {query, params, _select} = where(Post, [p], p.title == ^"foo" and p.id in ^[1, 2, 3] and
+                                                p.title == ^"bar") |> normalize_with_params()
     assert Macro.to_string(hd(query.wheres).expr) ==
            "&0.post_title() == ^0 and &0.id() in ^(1, 3) and &0.post_title() == ^4"
     assert params == ["foo", 1, 2, 3, "bar"]
@@ -537,16 +939,16 @@ defmodule Ecto.Query.PlannerTest do
     assert query.select.expr ==
              {:&, [], [0]}
     assert query.select.fields ==
-           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :crazy_post], 0)
+           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :prefs, :meta, :metas], 0)
 
-    query = from(Post, []) |> select([p], {p, p.title}) |> normalize()
+    query = from(Post, []) |> select([p], {p, p.title, "Post"}) |> normalize()
     assert query.select.fields ==
-           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :crazy_post], 0) ++
+           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :prefs, :meta, :metas], 0) ++
            [{{:., [type: :string], [{:&, [], [0]}, :post_title]}, [], []}]
 
-    query = from(Post, []) |> select([p], {p.title, p}) |> normalize()
+    query = from(Post, []) |> select([p], {p.title, p, "Post"}) |> normalize()
     assert query.select.fields ==
-           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :crazy_post], 0) ++
+           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :prefs, :meta, :metas], 0) ++
            [{{:., [type: :string], [{:&, [], [0]}, :post_title]}, [], []}]
 
     query =
@@ -556,9 +958,24 @@ defmodule Ecto.Query.PlannerTest do
       |> select([p, _], {p.title, p})
       |> normalize()
     assert query.select.fields ==
-           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :crazy_post], 0) ++
-           select_fields([:id, :text, :posted, :uuid, :special, :crazy_comment, :post_id, :crazy_post_id], 1) ++
+           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :prefs, :meta, :metas], 0) ++
+           select_fields([:id, :text, :posted, :uuid, :crazy_comment, :post_id, :crazy_post_id], 1) ++
            [{{:., [type: :string], [{:&, [], [0]}, :post_title]}, [], []}]
+  end
+
+  test "normalize: select with unions" do
+    union_query = from(Post, []) |> select([p], %{title: p.title, category: "Post"})
+    query = from(Post, []) |> select([p], %{title: p.title, category: "Post"}) |> union(^union_query) |> normalize()
+
+    union_query = query.combinations |> List.first() |> elem(1)
+    assert "Post" in query.select.fields
+    assert query.select.fields == union_query.select.fields
+  end
+
+  test "normalize: select on schemaless" do
+    assert_raise Ecto.QueryError, ~r"need to explicitly pass a :select clause in query", fn ->
+      from("posts", []) |> normalize()
+    end
   end
 
   test "normalize: select with struct/2" do
@@ -581,7 +998,7 @@ defmodule Ecto.Query.PlannerTest do
       |> select([p, c], {p, struct(c, [:id, :text])})
       |> normalize()
     assert query.select.fields ==
-           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :crazy_post], 0) ++
+           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :prefs, :meta, :metas], 0) ++
            select_fields([:id, :text], 1)
   end
 
@@ -606,9 +1023,9 @@ defmodule Ecto.Query.PlannerTest do
     assert query.select.expr == {:&, [], [0]}
     assert query.select.fields ==
            select_fields([:id, :post_title], 0) ++
-           select_fields([:id], 1) ++
            select_fields([:id, :text], 1) ++
-           select_fields([:id], 0)
+           select_fields([:id], 0) ++
+           select_fields([:id], 1)
   end
 
   test "normalize: select with map/2" do
@@ -627,7 +1044,7 @@ defmodule Ecto.Query.PlannerTest do
       |> select([p, c], {p, map(c, [:id, :text])})
       |> normalize()
     assert query.select.fields ==
-           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :crazy_post], 0) ++
+           select_fields([:id, :post_title, :text, :code, :posted, :visits, :links, :prefs, :meta, :metas], 0) ++
            select_fields([:id, :text], 1)
   end
 
@@ -652,9 +1069,9 @@ defmodule Ecto.Query.PlannerTest do
     assert query.select.expr == {:&, [], [0]}
     assert query.select.fields ==
            select_fields([:id, :post_title], 0) ++
-           select_fields([:id], 1) ++
            select_fields([:id, :text], 1) ++
-           select_fields([:id], 0)
+            select_fields([:id], 0) ++
+           select_fields([:id], 1)
   end
 
   test "normalize: windows" do
@@ -666,7 +1083,7 @@ defmodule Ecto.Query.PlannerTest do
     end
   end
 
-  test "normalize: preload" do
+  test "normalize: preload errors" do
     message = ~r"the binding used in `from` must be selected in `select` when using `preload`"
     assert_raise Ecto.QueryError, message, fn ->
       Post |> preload(:hello) |> select([p], p.title) |> normalize
@@ -678,10 +1095,20 @@ defmodule Ecto.Query.PlannerTest do
     end
   end
 
-  test "normalize: preload assoc" do
-    query = from(p in Post, join: c in assoc(p, :comments), preload: [comments: c])
-    normalize(query)
+  test "normalize: preload assoc merges"  do
+    {_, _, select} =
+      from(p in Post)
+      |> join(:inner, [p], c in assoc(p, :comments))
+      |> join(:inner, [_, c], cp in assoc(c, :comment_posts))
+      |> join(:inner, [_, c], ip in assoc(c, :post))
+      |> preload([_, c, cp, _], comments: {c, comment_posts: cp})
+      |> preload([_, c, _, ip], comments: {c, post: ip})
+      |> normalize_with_params()
 
+    assert select.assocs == [comments: {1, [comment_posts: {2, []}, post: {3, []}]}]
+  end
+
+  test "normalize: preload assoc errors" do
     message = ~r"field `Ecto.Query.PlannerTest.Post.not_field` in preload is not an association"
     assert_raise Ecto.QueryError, message, fn ->
       query = from(p in Post, join: c in assoc(p, :comments), preload: [not_field: c])
@@ -709,6 +1136,16 @@ defmodule Ecto.Query.PlannerTest do
     end
   end
 
+  test "normalize: all does not allow bindings in order bys when having combinations" do
+    assert_raise Ecto.QueryError,  ~r"cannot use bindings in `order_by` when using `union_all`", fn ->
+      posts_query = from(post in Post, select: post.id)
+      posts_query
+      |> union_all(^posts_query)
+      |> order_by([post], post.id)
+      |> normalize(:all)
+    end
+  end
+
   test "normalize: update all only allow filters and checks updates" do
     message = ~r"`update_all` requires at least one field to be updated"
     assert_raise Ecto.QueryError, message, fn ->
@@ -721,7 +1158,7 @@ defmodule Ecto.Query.PlannerTest do
       |> normalize(:update_all)
     end
 
-    message = ~r"`update_all` allows only `where` and `join` expressions"
+    message = ~r"`update_all` allows only `with_cte`, `where` and `join` expressions"
     assert_raise Ecto.QueryError, message, fn ->
       from(p in Post, order_by: p.title, update: [set: [title: "foo"]]) |> normalize(:update_all)
     end
@@ -733,7 +1170,7 @@ defmodule Ecto.Query.PlannerTest do
       from(p in Post, update: [set: [name: "foo"]]) |> normalize(:delete_all)
     end
 
-    message = ~r"`delete_all` allows only `where` and `join` expressions"
+    message = ~r"`delete_all` allows only `with_cte`, `where` and `join` expressions"
     assert_raise Ecto.QueryError, message, fn ->
       from(p in Post, order_by: p.title) |> normalize(:delete_all)
     end

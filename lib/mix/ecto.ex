@@ -23,18 +23,23 @@ defmodule Mix.Ecto do
 
   defp parse_repo([], []) do
     apps =
-      if apps_paths = Mix.Project.apps_paths do
-        Map.keys(apps_paths)
+      if apps_paths = Mix.Project.apps_paths() do
+        # TODO: Use the proper ordering from Mix.Project.deps_apps
+        # when we depend on Elixir v1.11+.
+        apps_paths |> Map.keys() |> Enum.sort()
       else
-        [Mix.Project.config[:app]]
+        [Mix.Project.config()[:app]]
       end
 
     apps
-    |> Enum.flat_map(&Application.get_env(&1, :ecto_repos, []))
+    |> Enum.flat_map(fn app ->
+      Application.load(app)
+      Application.get_env(app, :ecto_repos, [])
+    end)
     |> Enum.uniq()
     |> case do
       [] ->
-        Mix.shell.error """
+        Mix.shell().error """
         warning: could not find Ecto repos in any of the apps: #{inspect apps}.
 
         You can avoid this warning by passing the -r flag or by setting the
@@ -60,7 +65,7 @@ defmodule Mix.Ecto do
     Mix.Task.run "loadpaths", args
 
     unless "--no-compile" in args do
-      Mix.Project.compile(args)
+      Mix.Task.run("compile", args)
     end
 
     case Code.ensure_compiled(repo) do
@@ -97,7 +102,7 @@ defmodule Mix.Ecto do
   Raises on umbrella application.
   """
   def no_umbrella!(task) do
-    if Mix.Project.umbrella? do
+    if Mix.Project.umbrella?() do
       Mix.raise "Cannot run task #{inspect task} from umbrella application"
     end
   end

@@ -1,24 +1,6 @@
 defmodule Ecto.LogEntry do
-  @moduledoc """
-  Struct used for logging entries.
-
-  It is composed of the following fields:
-
-    * query - the query as string;
-    * source - the query data source;
-    * params - the query parameters;
-    * result - the query result as an `:ok` or `:error` tuple;
-    * query_time - the time spent executing the query in native units;
-    * decode_time - the time spent decoding the result in native units (it may be nil);
-    * queue_time - the time spent to check the connection out in native units (it may be nil);
-    * connection_pid - the connection process that executed the query;
-    * caller_pid - the application process that executed the query;
-    * ansi_color - the color that should be used when logging the entry.
-
-  Notice all times are stored in native unit. You must convert them to
-  the proper unit by using `System.convert_time_unit/3` before logging.
-  """
-
+  @moduledoc false
+  # TODO: Remove me in future versions
   alias Ecto.LogEntry
 
   @type t :: %LogEntry{
@@ -28,8 +10,7 @@ defmodule Ecto.LogEntry do
           query_time: integer | nil,
           decode_time: integer | nil,
           queue_time: integer | nil,
-          result: {:ok, term} | {:error, Exception.t()},
-          caller_pid: pid
+          result: {:ok, term} | {:error, Exception.t()}
         }
 
   defstruct query: nil,
@@ -38,8 +19,7 @@ defmodule Ecto.LogEntry do
             query_time: nil,
             decode_time: nil,
             queue_time: nil,
-            result: nil,
-            caller_pid: nil
+            result: nil
 
   require Logger
 
@@ -49,13 +29,15 @@ defmodule Ecto.LogEntry do
   The logger call won't be removed at compile time as
   custom level is given.
   """
-  def log(entry, level, metadata \\ []) do
+  @deprecated "Use Telemetry instead"
+  def log(entry, level \\ :debug, metadata \\ []) do
     Logger.log(level, fn -> to_iodata(entry) end, metadata)
   end
 
   @doc """
   Converts a log entry into iodata.
   """
+  @deprecated "Use Telemetry instead"
   def to_iodata(entry) do
     %{
       query_time: query_time,

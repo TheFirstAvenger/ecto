@@ -11,6 +11,24 @@ defmodule Ecto.RepoTest do
     schema "my_parent" do
       field :n, :integer
     end
+
+    def changeset(struct, params) do
+      Ecto.Changeset.cast(struct, params, [:n])
+    end
+  end
+
+  defmodule MyParentWithPrefix do
+    use Ecto.Schema
+
+    @schema_prefix "private"
+
+    schema "my_parent" do
+      field :n, :integer
+    end
+
+    def changeset(struct, params) do
+      Ecto.Changeset.cast(struct, params, [:n])
+    end
   end
 
   defmodule MyEmbed do
@@ -34,12 +52,53 @@ defmodule Ecto.RepoTest do
     end
   end
 
+  defmodule MySchemaWithPrefix do
+    use Ecto.Schema
+
+    @schema_prefix "private"
+
+    schema "my_schema" do
+      field :x, :string
+    end
+  end
+
   defmodule MySchemaWithAssoc do
     use Ecto.Schema
 
     schema "my_schema" do
       field :n, :integer
       belongs_to :parent, MyParent
+    end
+  end
+
+  defmodule MySchemaWithPrefixedAssoc do
+    use Ecto.Schema
+
+    schema "my_schema" do
+      field :n, :integer
+      belongs_to :parent, MyParentWithPrefix
+    end
+  end
+
+  defmodule MyPrefixedSchemaWithAssoc do
+    use Ecto.Schema
+
+    @schema_prefix "other"
+
+    schema "my_schema" do
+      field :n, :integer
+      belongs_to :parent, MyParent
+    end
+  end
+
+  defmodule MyPrefixedSchemaWithPrefixedAssoc do
+    use Ecto.Schema
+
+    @schema_prefix "other"
+
+    schema "my_schema" do
+      field :n, :integer
+      belongs_to :parent, MyParentWithPrefix
     end
   end
 
@@ -161,54 +220,93 @@ defmodule Ecto.RepoTest do
     end
   end
 
+  defmodule DefaultOptionRepo do
+    use Ecto.Repo, otp_app: :ecto, adapter: Ecto.TestAdapter
+
+    def default_options(:all), do: [prefix: "all_schema"]
+    def default_options(:update_all), do: [prefix: "update_all_schema"]
+    def default_options(_), do: [prefix: "fallback_schema"]
+  end
+
+  describe "default_options" do
+    test "passes a default option for operation" do
+      {:ok, _pid} = DefaultOptionRepo.start_link(url: "ecto://user:pass@local/hello")
+      DefaultOptionRepo.all(MySchema)
+      assert_received {:all, query}
+      assert query.prefix == "all_schema"
+
+      DefaultOptionRepo.all(MySchema, prefix: "overridden_schema")
+      assert_received {:all, query}
+      assert query.prefix == "overridden_schema"
+
+      DefaultOptionRepo.update_all(MySchema, set: [x: "foo"])
+      assert_received {:update_all, query}
+      assert query.prefix == "update_all_schema"
+
+      DefaultOptionRepo.delete_all(MySchema)
+      assert_received {:delete_all, query}
+      assert query.prefix == "fallback_schema"
+    end
+  end
+
   describe "aggregate" do
     test "aggregates on the given field" do
       TestRepo.aggregate(MySchema, :min, :id)
       assert_received {:all, query}
-      assert inspect(query) == "#Ecto.Query<from m in Ecto.RepoTest.MySchema, select: min(m.id)>"
+      assert inspect(query) == "#Ecto.Query<from m0 in Ecto.RepoTest.MySchema, select: min(m0.id)>"
 
       TestRepo.aggregate(MySchema, :max, :id)
       assert_received {:all, query}
-      assert inspect(query) == "#Ecto.Query<from m in Ecto.RepoTest.MySchema, select: max(m.id)>"
+      assert inspect(query) == "#Ecto.Query<from m0 in Ecto.RepoTest.MySchema, select: max(m0.id)>"
 
       TestRepo.aggregate(MySchema, :sum, :id)
       assert_received {:all, query}
-      assert inspect(query) == "#Ecto.Query<from m in Ecto.RepoTest.MySchema, select: sum(m.id)>"
+      assert inspect(query) == "#Ecto.Query<from m0 in Ecto.RepoTest.MySchema, select: sum(m0.id)>"
 
       TestRepo.aggregate(MySchema, :avg, :id)
       assert_received {:all, query}
-      assert inspect(query) == "#Ecto.Query<from m in Ecto.RepoTest.MySchema, select: avg(m.id)>"
+      assert inspect(query) == "#Ecto.Query<from m0 in Ecto.RepoTest.MySchema, select: avg(m0.id)>"
 
       TestRepo.aggregate(MySchema, :count, :id)
       assert_received {:all, query}
-      assert inspect(query) == "#Ecto.Query<from m in Ecto.RepoTest.MySchema, select: count(m.id)>"
+      assert inspect(query) == "#Ecto.Query<from m0 in Ecto.RepoTest.MySchema, select: count(m0.id)>"
+
+      TestRepo.aggregate(MySchema, :count)
+      assert_received {:all, query}
+      assert inspect(query) == "#Ecto.Query<from m0 in Ecto.RepoTest.MySchema, select: count()>"
+    end
+
+    test "aggregates handle a prefix option" do
+      TestRepo.aggregate(MySchema, :min, :id, prefix: "public")
+      assert_received {:all, query}
+      assert query.prefix == "public"
     end
 
     test "removes any preload from query" do
       from(MySchemaWithAssoc, preload: :parent) |> TestRepo.aggregate(:count, :id)
       assert_received {:all, query}
-      assert inspect(query) == "#Ecto.Query<from m in Ecto.RepoTest.MySchemaWithAssoc, select: count(m.id)>"
+      assert inspect(query) == "#Ecto.Query<from m0 in Ecto.RepoTest.MySchemaWithAssoc, select: count(m0.id)>"
     end
 
     test "removes order by from query without distinct/limit/offset" do
       from(MySchema, order_by: :id) |> TestRepo.aggregate(:count, :id)
       assert_received {:all, query}
-      assert inspect(query) == "#Ecto.Query<from m in Ecto.RepoTest.MySchema, select: count(m.id)>"
+      assert inspect(query) == "#Ecto.Query<from m0 in Ecto.RepoTest.MySchema, select: count(m0.id)>"
     end
 
     test "overrides any select" do
       from(MySchema, select: true) |> TestRepo.aggregate(:count, :id)
       assert_received {:all, query}
-      assert inspect(query) == "#Ecto.Query<from m in Ecto.RepoTest.MySchema, select: count(m.id)>"
+      assert inspect(query) == "#Ecto.Query<from m0 in Ecto.RepoTest.MySchema, select: count(m0.id)>"
     end
 
     test "uses subqueries with distinct/limit/offset" do
       from(MySchema, limit: 5) |> TestRepo.aggregate(:count, :id)
       assert_received {:all, query}
       assert inspect(query) ==
-               "#Ecto.Query<from m in subquery(from m in Ecto.RepoTest.MySchema,\n" <>
+               "#Ecto.Query<from m0 in subquery(from m0 in Ecto.RepoTest.MySchema,\n" <>
                 "  limit: 5,\n" <>
-                "  select: %{id: m.id}), select: count(m.id)>"
+                "  select: %{id: m0.id}), select: count(m0.id)>"
     end
 
     test "raises when aggregating with group_by" do
@@ -222,35 +320,39 @@ defmodule Ecto.RepoTest do
     test "selects 1 and sets limit to 1" do
       TestRepo.exists?(MySchema)
       assert_received {:all, query}
-      assert inspect(query) == "#Ecto.Query<from m in Ecto.RepoTest.MySchema, limit: 1, select: 1>"
+      assert inspect(query) == "#Ecto.Query<from m0 in Ecto.RepoTest.MySchema, limit: 1, select: 1>"
 
       from(MySchema, select: [:id], limit: 10) |> TestRepo.exists?
       assert_received {:all, query}
-      assert inspect(query) == "#Ecto.Query<from m in Ecto.RepoTest.MySchema, limit: 1, select: 1>"
+      assert inspect(query) == "#Ecto.Query<from m0 in Ecto.RepoTest.MySchema, limit: 1, select: 1>"
     end
 
     test "removes any preload from query" do
       from(MySchemaWithAssoc, preload: :parent) |> TestRepo.exists?
       assert_received {:all, query}
-      assert inspect(query) == "#Ecto.Query<from m in Ecto.RepoTest.MySchemaWithAssoc, limit: 1, select: 1>"
+      assert inspect(query) == "#Ecto.Query<from m0 in Ecto.RepoTest.MySchemaWithAssoc, limit: 1, select: 1>"
     end
 
     test "removes distinct from query" do
       from(MySchema, select: [:id], distinct: true) |> TestRepo.exists?
       assert_received {:all, query}
-      assert inspect(query) == "#Ecto.Query<from m in Ecto.RepoTest.MySchema, limit: 1, select: 1>"
+      assert inspect(query) == "#Ecto.Query<from m0 in Ecto.RepoTest.MySchema, limit: 1, select: 1>"
     end
 
     test "removes order by from query without distinct/limit/offset" do
       from(MySchema, order_by: :id) |> TestRepo.exists?
       assert_received {:all, query}
-      assert inspect(query) == "#Ecto.Query<from m in Ecto.RepoTest.MySchema, limit: 1, select: 1>"
+      assert inspect(query) == "#Ecto.Query<from m0 in Ecto.RepoTest.MySchema, limit: 1, select: 1>"
     end
 
     test "overrides any select" do
       from(MySchema, select: true) |> TestRepo.exists?
       assert_received {:all, query}
-      assert inspect(query) == "#Ecto.Query<from m in Ecto.RepoTest.MySchema, limit: 1, select: 1>"
+      assert inspect(query) == "#Ecto.Query<from m0 in Ecto.RepoTest.MySchema, limit: 1, select: 1>"
+
+      from(MySchema, union: ^from(MySchema, select: true)) |> TestRepo.exists?
+      assert_received {:all, query}
+      assert inspect(query) == "#Ecto.Query<from m0 in Ecto.RepoTest.MySchema, union: (from m0 in Ecto.RepoTest.MySchema,\n  select: 1), limit: 1, select: 1>"
     end
   end
 
@@ -270,59 +372,69 @@ defmodule Ecto.RepoTest do
       assert_raise Ecto.QueryError, ~r"preloads are not supported on streams", fn ->
         TestRepo.stream(query)
       end
+
+      query =
+        MySchemaWithAssoc
+        |> join(:inner, [m], p in assoc(m, :parent))
+        |> preload([_m, p], parent: p)
+
+      assert_raise Ecto.QueryError, ~r"preloads are not supported on streams", fn ->
+        TestRepo.stream(query)
+      end
     end
   end
 
-  describe "insert" do
-    test "passes returning" do
+  describe "returning" do
+    test "on insert" do
       TestRepo.insert(%MySchemaWithAssoc{}, returning: [:id])
       assert_received {:insert, %{source: "my_schema", returning: [:id]}}
+      TestRepo.insert(%MySchemaWithAssoc{}, returning: [:parent_id])
+      assert_received {:insert, %{source: "my_schema", returning: [:id, :parent_id]}}
       TestRepo.insert(%MySchemaWithAssoc{}, returning: true)
       assert_received {:insert, %{source: "my_schema", returning: [:id, :parent_id, :n]}}
       TestRepo.insert(%MySchemaWithAssoc{}, returning: false)
       assert_received {:insert, %{source: "my_schema", returning: [:id]}}
     end
 
-    test "passes returning to children when it's value is a boolean" do
-      TestRepo.insert(%MySchemaWithAssoc{id: 1, parent: %MyParent{}}, returning: true)
-      assert_receive {:insert, %{source: "my_parent", returning: [:id, :n]}}
-      TestRepo.insert(%MySchemaWithAssoc{id: 1, parent: %MyParent{}}, returning: false)
-      assert_receive {:insert, %{source: "my_parent", returning: [:id]}}
-    end
-
-    test "does not pass returning to children when value is a list" do
-      TestRepo.insert(%MySchemaWithAssoc{id: 1, parent: %MyParent{}}, returning: [:id])
-      assert_receive {:insert, %{source: "my_parent", returning: [:id]}}
-    end
-  end
-
-  describe "update" do
-    test "passes returning" do
+    test "on update" do
       changeset = Ecto.Changeset.change(%MySchemaWithAssoc{id: 1}, %{n: 2})
-      TestRepo.update(changeset, returning: [])
-      assert_received {:update, %{source: "my_schema", returning: []}}
+      TestRepo.update(changeset, returning: [:id])
+      assert_received {:update, %{source: "my_schema", returning: [:id]}}
+      TestRepo.update(changeset, returning: [:parent_id])
+      assert_received {:update, %{source: "my_schema", returning: [:parent_id]}}
       TestRepo.update(changeset, returning: true)
-      assert_received {:update, %{source: "my_schema", returning: []}}
+      assert_received {:update, %{source: "my_schema", returning: [:parent_id, :n, :id]}}
       TestRepo.update(changeset, returning: false)
       assert_received {:update, %{source: "my_schema", returning: []}}
-    end
-
-    test "passes returning to children when it's value is a boolean" do
-      changeset = Ecto.Changeset.change(%MySchemaWithAssoc{id: 1}, %{n: 2, parent: %MyParent{}})
-      TestRepo.update!(changeset, returning: true)
-      assert_receive {:insert, %{source: "my_parent", returning: [:id, :n]}}
-      TestRepo.update(changeset, returning: false)
-      assert_receive {:insert, %{source: "my_parent", returning: [:id]}}
-    end
-
-    test "does not pass returning to children when value is a list" do
-      schema = Ecto.Changeset.change(%MySchemaWithAssoc{id: 1}, %{n: 2, parent: %MyParent{}})
-      TestRepo.update(schema, returning: [:id])
-      assert_receive {:insert, %{source: "my_parent", returning: [:id]}}
     end
   end
 
   describe "insert_all" do
+    test "takes query" do
+      import Ecto.Query
+
+      value = "foo"
+      query = from(s in MySchema, select: s.x, where: s.y == ^value)
+
+      TestRepo.insert_all(MySchema, [
+        [y: "y1", x: "x1"],
+        [x: query, z: "z2"],
+        [z: "z3", x: query],
+        [y: query, z: query]
+      ])
+
+      assert_received {:insert_all, %{source: "my_schema"}, rows}
+      assert [[x: "x1", yyy: "y1"],
+              [x: {%Ecto.Query{} = query2, [^value]}, z: "z2"],
+              [x: {%Ecto.Query{} = query3, [^value]}, z: "z3"],
+              [yyy: {%Ecto.Query{} = query4y, [^value]}, z: {%Ecto.Query{} = query4x, [^value]}]] = rows
+
+      assert [%{expr: {:==, _, [_, {:^, [], [2]}]}}] = query2.wheres
+      assert [%{expr: {:==, _, [_, {:^, [], [4]}]}}] = query3.wheres
+      assert [%{expr: {:==, _, [_, {:^, [], [6]}]}}] = query4y.wheres
+      assert [%{expr: {:==, _, [_, {:^, [], [7]}]}}] = query4x.wheres
+    end
+
     test "raises when on associations" do
       assert_raise ArgumentError, fn ->
         TestRepo.insert_all MySchema, [%{another: nil}]
@@ -423,30 +535,6 @@ defmodule Ecto.RepoTest do
       assert_raise Ecto.ChangeError, ~r"does not match type :string$", fn ->
         TestRepo.insert!(schema)
       end
-
-      schema = struct(DumpSchema, d: Decimal.new("NaN"))
-
-      assert_raise Ecto.ChangeError, ~r"and `NaN` values are not supported", fn ->
-        TestRepo.insert!(schema)
-      end
-
-      schema = struct(DumpSchema, d: Decimal.new("NaN"))
-
-      assert_raise Ecto.ChangeError, ~r"and `NaN` values are not supported", fn ->
-        TestRepo.insert!(schema)
-      end
-
-      schema = struct(DumpSchema, t: ~T[09:00:00.000000])
-
-      assert_raise Ecto.ChangeError, ~r"Microseconds must be empty.", fn ->
-        TestRepo.insert!(schema)
-      end
-
-      schema = struct(DumpSchema, t_usec: ~T[09:00:00])
-
-      assert_raise Ecto.ChangeError, ~r"Microsecond precision is required.", fn ->
-        TestRepo.insert!(schema)
-      end
     end
   end
 
@@ -468,7 +556,8 @@ defmodule Ecto.RepoTest do
     end
 
     test "insert, update, insert_or_update and delete filters out unknown field" do
-      valid = Ecto.Changeset.change(%MySchema{id: 1}, %{unknown: "foo"})
+      valid = Ecto.Changeset.change(%MySchema{id: 1})
+      valid = put_in valid.changes[:unknown], "foo"
 
       assert {:ok, %MySchema{} = inserted} = TestRepo.insert(valid)
       refute Map.has_key?(inserted, :unknown)
@@ -530,10 +619,52 @@ defmodule Ecto.RepoTest do
       assert changeset.errors == [id: {"is old", [stale: true]}]
     end
 
-    test "insert, update, insert_or_update and delete sets schema prefix" do
+    test "insert and delete sets schema prefix with struct" do
+      valid = %MySchema{id: 1}
+
+      assert {:ok, schema} = TestRepo.insert(valid, prefix: "public")
+      assert schema.__meta__.prefix == "public"
+
+      assert {:ok, schema} = TestRepo.delete(valid, prefix: "public")
+      assert schema.__meta__.prefix == "public"
+    end
+
+    test "insert and delete prefix overrides schema_prefix with struct" do
+      valid = %MySchemaWithPrefix{id: 1}
+
+      assert {:ok, schema} = TestRepo.insert(valid, prefix: "public")
+      assert schema.__meta__.prefix == "public"
+
+      assert {:ok, schema} = TestRepo.delete(valid, prefix: "public")
+      assert schema.__meta__.prefix == "public"
+    end
+
+    test "insert, update, insert_or_update and delete sets schema prefix with changeset" do
       valid = Ecto.Changeset.cast(%MySchema{id: 1}, %{x: "foo"}, [:x])
 
       assert {:ok, schema} = TestRepo.insert(valid, prefix: "public")
+      assert schema.__meta__.prefix == "public"
+
+      assert {:ok, schema} = TestRepo.insert_or_update(valid, prefix: "public")
+      assert schema.__meta__.prefix == "public"
+
+      assert {:ok, schema} = TestRepo.update(valid, prefix: "public")
+      assert schema.__meta__.prefix == "public"
+
+      assert {:ok, schema} = TestRepo.delete(valid, prefix: "public")
+      assert schema.__meta__.prefix == "public"
+    end
+
+    test "insert, update, insert_or_update and delete prefix overrides schema_prefix" do
+      valid = Ecto.Changeset.cast(%MySchemaWithPrefix{id: 1}, %{x: "foo"}, [:x])
+
+      assert {:ok, schema} = TestRepo.insert(valid)
+      assert schema.__meta__.prefix == "private"
+
+      assert {:ok, schema} = TestRepo.insert(valid, prefix: "public")
+      assert schema.__meta__.prefix == "public"
+
+      assert {:ok, schema} = TestRepo.insert_or_update(valid, prefix: "public")
       assert schema.__meta__.prefix == "public"
 
       assert {:ok, schema} = TestRepo.update(valid, prefix: "public")
@@ -549,33 +680,174 @@ defmodule Ecto.RepoTest do
         |> Ecto.Changeset.cast(%{x: "foo"}, [:x])
         |> Map.put(:repo_opts, [prefix: "public"])
 
-      assert {:ok, schema} = TestRepo.insert(valid, prefix: "public")
+      assert {:ok, schema} = TestRepo.insert(valid)
       assert schema.__meta__.prefix == "public"
+
+      assert {:ok, schema} = TestRepo.update(valid)
+      assert schema.__meta__.prefix == "public"
+
+      assert {:ok, schema} = TestRepo.delete(valid)
+      assert schema.__meta__.prefix == "public"
+    end
+
+    test "insert, update, and delete prefix option overrides repo opts" do
+      valid =
+        %MySchema{id: 1}
+        |> Ecto.Changeset.cast(%{x: "foo"}, [:x])
+        |> Map.put(:repo_opts, [prefix: "public"])
+
+      assert {:ok, schema} = TestRepo.insert(valid, prefix: "private")
+      assert schema.__meta__.prefix == "private"
+
+      assert {:ok, schema} = TestRepo.update(valid, prefix: "private")
+      assert schema.__meta__.prefix == "private"
+
+      assert {:ok, schema} = TestRepo.delete(valid, prefix: "private")
+      assert schema.__meta__.prefix == "private"
+    end
+
+    test "insert and update with repo_changes" do
+      valid =
+        %MySchema{id: 1}
+        |> Ecto.Changeset.change()
+        |> Map.put(:repo_changes, %{x: "repo change"})
+
+      assert {:ok, schema} = TestRepo.insert(valid)
+      assert schema.x == "repo change"
+
+      assert {:ok, schema} = TestRepo.update(valid)
+      assert schema.x == "repo change"
+
+      invalid = %{valid | valid?: false}
+
+      assert {:error, changeset} = TestRepo.insert(invalid)
+      refute changeset.data.x
+      refute changeset.changes[:x]
+
+      assert {:error, changeset} = TestRepo.update(invalid)
+      refute changeset.data.x
+      refute changeset.changes[:x]
+    end
+
+    test "insert, update and insert_or_update parent schema_prefix does not override `nil` children schema_prefix" do
+      assert {:ok, schema} = TestRepo.insert(%MyParentWithPrefix{id: 1})
+      assert schema.__meta__.prefix == "private"
+
+      valid =
+        %MySchemaWithPrefixedAssoc{id: 1}
+        |> TestRepo.preload(:parent)
+        |> Ecto.Changeset.cast(%{parent: %{id: 1}}, [])
+        |> Ecto.Changeset.cast_assoc(:parent)
+
+      assert {:ok, schema} = TestRepo.insert(valid)
+      assert schema.__meta__.prefix == nil
+      assert schema.parent.__meta__.prefix == "private"
+
+      assert {:ok, schema} = TestRepo.insert_or_update(valid)
+      assert schema.__meta__.prefix == nil
+      assert schema.parent.__meta__.prefix == "private"
+
+      assert {:ok, schema} = TestRepo.update(valid)
+      assert schema.__meta__.prefix == nil
+      assert schema.parent.__meta__.prefix == "private"
+    end
+
+    test "insert, update and insert_or_update `nil` parent schema_prefix is overriden by children schema_prefix" do
+      assert {:ok, schema} = TestRepo.insert(%MyParent{id: 1})
+      assert schema.__meta__.prefix == nil
+
+      valid =
+        %MyPrefixedSchemaWithAssoc{id: 1}
+        |> TestRepo.preload(:parent)
+        |> Ecto.Changeset.cast(%{parent: %{id: 1}}, [])
+        |> Ecto.Changeset.cast_assoc(:parent)
+
+      assert {:ok, schema} = TestRepo.insert(valid)
+      assert schema.__meta__.prefix == "other"
+      assert schema.parent.__meta__.prefix == "other"
+
+      assert {:ok, schema} = TestRepo.insert_or_update(valid)
+      assert schema.__meta__.prefix == "other"
+      assert schema.parent.__meta__.prefix == "other"
+
+      assert {:ok, schema} = TestRepo.update(valid)
+      assert schema.__meta__.prefix == "other"
+      assert schema.parent.__meta__.prefix == "other"
+    end
+
+    test "insert, update and insert_or_update parent schema_prefix does not override children schema_prefix" do
+      assert {:ok, schema} = TestRepo.insert(%MyParentWithPrefix{id: 1})
+      assert schema.__meta__.prefix == "private"
+
+      valid =
+        %MyPrefixedSchemaWithPrefixedAssoc{id: 1}
+        |> TestRepo.preload(:parent)
+        |> Ecto.Changeset.cast(%{parent: %{id: 1}}, [])
+        |> Ecto.Changeset.cast_assoc(:parent)
+
+      assert {:ok, schema} = TestRepo.insert(valid)
+      assert schema.__meta__.prefix == "other"
+      assert schema.parent.__meta__.prefix == "private"
+
+      assert {:ok, schema} = TestRepo.insert_or_update(valid)
+      assert schema.__meta__.prefix == "other"
+      assert schema.parent.__meta__.prefix == "private"
+
+      assert {:ok, schema} = TestRepo.update(valid)
+      assert schema.__meta__.prefix == "other"
+      assert schema.parent.__meta__.prefix == "private"
+    end
+
+    test "insert, update and insert_or_update prefix overrides schema_prefix in associations" do
+      valid =
+        %MySchemaWithPrefixedAssoc{id: 1}
+        |> TestRepo.preload(:parent)
+        |> Ecto.Changeset.cast(%{parent: %{id: 1}}, [])
+        |> Ecto.Changeset.cast_assoc(:parent)
+
+      assert {:ok, schema} = TestRepo.insert(valid, prefix: "public")
+      assert schema.parent.__meta__.prefix == "public"
+
+      assert {:ok, schema} = TestRepo.insert_or_update(valid, prefix: "public")
+      assert schema.parent.__meta__.prefix == "public"
 
       assert {:ok, schema} = TestRepo.update(valid, prefix: "public")
-      assert schema.__meta__.prefix == "public"
+      assert schema.parent.__meta__.prefix == "public"
+    end
 
-      assert {:ok, schema} = TestRepo.delete(valid, prefix: "public")
-      assert schema.__meta__.prefix == "public"
+    test "insert, and update prefix option overrides repo opts in associations" do
+      valid =
+        %MySchemaWithPrefixedAssoc{id: 1}
+        |> TestRepo.preload(:parent)
+        |> Ecto.Changeset.cast(%{parent: %{n: 1}}, [])
+        |> Ecto.Changeset.cast_assoc(:parent)
+
+      valid = put_in(valid.changes.parent.repo_opts, [prefix: "public"])
+
+      assert {:ok, schema} = TestRepo.insert(valid, prefix: "other")
+      assert schema.parent.__meta__.prefix == "other"
+
+      assert {:ok, schema} = TestRepo.update(valid, prefix: "other")
+      assert schema.parent.__meta__.prefix == "other"
     end
 
     test "insert, update, insert_or_update and delete errors on invalid changeset" do
       invalid = %Ecto.Changeset{valid?: false, data: %MySchema{}}
 
-      insert = %{invalid | action: :insert, repo: TestRepo}
-      assert {:error, ^insert} = TestRepo.insert(invalid)
-      assert {:error, ^insert} = TestRepo.insert_or_update(invalid)
+      insert = %{invalid | action: :insert, repo: TestRepo, repo_opts: [prefix: "prefix"]}
+      assert {:error, ^insert} = TestRepo.insert(invalid, prefix: "prefix")
+      assert {:error, ^insert} = TestRepo.insert_or_update(invalid, prefix: "prefix")
 
-      update = %{invalid | action: :update, repo: TestRepo}
-      assert {:error, ^update} = TestRepo.update(invalid)
+      update = %{invalid | action: :update, repo: TestRepo, repo_opts: [prefix: "prefix"]}
+      assert {:error, ^update} = TestRepo.update(invalid, prefix: "prefix")
 
-      delete = %{invalid | action: :delete, repo: TestRepo}
-      assert {:error, ^delete} = TestRepo.delete(invalid)
+      delete = %{invalid | action: :delete, repo: TestRepo, repo_opts: [prefix: "prefix"]}
+      assert {:error, ^delete} = TestRepo.delete(invalid, prefix: "prefix")
 
-      ignore = %{invalid | action: :ignore, repo: TestRepo}
-      assert {:error, ^insert} = TestRepo.insert(ignore)
-      assert {:error, ^update} = TestRepo.update(ignore)
-      assert {:error, ^delete} = TestRepo.delete(ignore)
+      ignore = %{invalid | action: :ignore, repo: TestRepo, repo_opts: [prefix: "prefix"]}
+      assert {:error, ^insert} = TestRepo.insert(ignore, prefix: "prefix")
+      assert {:error, ^update} = TestRepo.update(ignore, prefix: "prefix")
+      assert {:error, ^delete} = TestRepo.delete(ignore, prefix: "prefix")
 
       assert_raise ArgumentError, ~r"a valid changeset with action :ignore was given to Ecto.TestRepo.insert/2", fn ->
         TestRepo.insert(%{ignore | valid?: true})
@@ -684,6 +956,34 @@ defmodule Ecto.RepoTest do
     end
   end
 
+  test "get, get_by, one and all sets schema prefix" do
+    assert schema = TestRepo.get(MySchema, 123, prefix: "public")
+    assert schema.__meta__.prefix == "public"
+
+    assert schema = TestRepo.get_by(MySchema, [id: 123], prefix: "public")
+    assert schema.__meta__.prefix == "public"
+
+    assert schema = TestRepo.one(MySchema, prefix: "public")
+    assert schema.__meta__.prefix == "public"
+
+    assert [schema] = TestRepo.all(MySchema, prefix: "public")
+    assert schema.__meta__.prefix == "public"
+  end
+
+  test "get, get_by, one and all ignores prefix if schema_prefix set" do
+    assert schema = TestRepo.get(MySchemaWithPrefix, 123, prefix: "public")
+    assert schema.__meta__.prefix == "private"
+
+    assert schema = TestRepo.get_by(MySchemaWithPrefix, [id: 123], prefix: "public")
+    assert schema.__meta__.prefix == "private"
+
+    assert schema = TestRepo.one(MySchemaWithPrefix, prefix: "public")
+    assert schema.__meta__.prefix == "private"
+
+    assert [schema] = TestRepo.all(MySchemaWithPrefix, prefix: "public")
+    assert schema.__meta__.prefix == "private"
+  end
+
   describe "changeset prepare" do
     defp prepare_changeset() do
       %MySchema{id: 1}
@@ -712,6 +1012,17 @@ defmodule Ecto.RepoTest do
       assert Process.get(:ecto_counter) == 2
     end
 
+    test "insert with prepare_changes that returns invalid changeset" do
+      changeset =
+        prepare_changeset()
+        |> Ecto.Changeset.prepare_changes(fn changeset ->
+          Ecto.Changeset.add_error(changeset, :x, "stop")
+        end)
+
+      assert {:error, %Ecto.Changeset{} = changeset} = TestRepo.insert(changeset)
+      assert {:x, {"stop", []}} in changeset.errors
+    end
+
     test "update runs prepare callbacks in transaction" do
       changeset = prepare_changeset()
       TestRepo.update!(changeset)
@@ -720,12 +1031,34 @@ defmodule Ecto.RepoTest do
       assert Process.get(:ecto_counter) == 2
     end
 
+    test "update with prepare_changes that returns invalid changeset" do
+      changeset =
+        prepare_changeset()
+        |> Ecto.Changeset.prepare_changes(fn changeset ->
+          Ecto.Changeset.add_error(changeset, :x, "stop")
+        end)
+
+      assert {:error, %Ecto.Changeset{} = changeset} = TestRepo.update(changeset)
+      assert {:x, {"stop", []}} in changeset.errors
+    end
+
     test "delete runs prepare callbacks in transaction" do
       changeset = prepare_changeset()
       TestRepo.delete!(changeset)
       assert_received {:transaction, _}
       assert Process.get(:ecto_repo) == TestRepo
       assert Process.get(:ecto_counter) == 2
+    end
+
+    test "delete with prepare_changes that returns invalid changeset" do
+      changeset =
+        prepare_changeset()
+        |> Ecto.Changeset.prepare_changes(fn changeset ->
+          Ecto.Changeset.add_error(changeset, :x, "stop")
+        end)
+
+      assert {:error, %Ecto.Changeset{} = changeset} = TestRepo.delete(changeset)
+      assert {:x, {"stop", []}} in changeset.errors
     end
 
     test "on embeds" do
@@ -812,7 +1145,7 @@ defmodule Ecto.RepoTest do
 
   describe "on conflict" do
     test "passes all fields on replace_all" do
-      fields = [:id, :x, :y, :z, :array, :map]
+      fields = [:id, :x, :yyy, :z, :array, :map]
       TestRepo.insert(%MySchema{id: 1}, on_conflict: :replace_all)
       assert_received {:insert, %{source: "my_schema", on_conflict: {^fields, [], []}}}
     end
@@ -823,9 +1156,41 @@ defmodule Ecto.RepoTest do
       assert_received {:insert, %{source: "my_schema", on_conflict: {^fields, [], []}}}
     end
 
-    test "passes all fields except primary keys on replace_all_except_primary_keys" do
-      fields = [:x, :y, :z, :array, :map]
-      TestRepo.insert(%MySchema{id: 1}, on_conflict: :replace_all_except_primary_key)
+    test "replaces specified fields on replace" do
+      fields = [:x, :yyy]
+      TestRepo.insert(
+        %MySchema{id: 1},
+        on_conflict: {:replace, [:x, :y]},
+        conflict_target: [:id]
+      )
+      assert_received {:insert, %{source: "my_schema", on_conflict: {^fields, [], [:id]}}}
+    end
+
+    test "replaces specified fields on replace without a schema" do
+      fields = [:x, :yyy]
+      rows = [[id: 1, x: "x", yyy: "yyy"]]
+      TestRepo.insert_all(
+        "my_schema",
+        rows,
+        on_conflict: {:replace, [:x, :yyy]},
+        conflict_target: [:id]
+      )
+      assert_received {:insert_all, %{source: "my_schema", on_conflict: {^fields, [], [:id]}}, ^rows}
+    end
+
+    test "raises on non-existent fields on replace" do
+      assert_raise ArgumentError, "unknown field for :on_conflict, got: :unknown", fn ->
+        TestRepo.insert(
+          %MySchema{id: 1},
+          on_conflict: {:replace, [:unknown]},
+          conflict_target: [:id]
+        )
+      end
+    end
+
+    test "passes all fields except given fields" do
+      fields = [:x, :yyy, :z, :map]
+      TestRepo.insert(%MySchema{id: 1}, on_conflict: {:replace_all_except, [:id, :array]})
       assert_received {:insert, %{source: "my_schema", on_conflict: {^fields, [], []}}}
     end
 
@@ -882,6 +1247,39 @@ defmodule Ecto.RepoTest do
     end
   end
 
+  describe "custom type as primary key" do
+    defmodule PrefixedID do
+      use Ecto.Type
+      def type(), do: :binary_id
+      def cast("foo-" <> _ = id), do: {:ok, id}
+      def cast(id), do: {:ok, "foo-" <> id}
+      def load(uuid), do: {:ok, "foo-" <> uuid}
+      def dump("foo-" <> uuid), do: {:ok, uuid}
+      def dump(_uuid), do: :error
+    end
+
+    defmodule MySchemaCustomPK do
+      use Ecto.Schema
+
+      @primary_key {:id, PrefixedID, autogenerate: true}
+      schema "" do
+      end
+    end
+
+    test "autogenerates value" do
+      assert {:ok, inserted} = TestRepo.insert(%MySchemaCustomPK{})
+      assert "foo-" <> _uuid = inserted.id
+    end
+
+    test "custom value" do
+      id = "a92f6d0e-52ef-4df8-808b-32d8ef037d48"
+      changeset = Ecto.Changeset.cast(%MySchemaCustomPK{}, %{id: id}, [:id])
+
+      assert {:ok, inserted} = TestRepo.insert(changeset)
+      assert inserted.id == "foo-" <> id
+    end
+  end
+
   describe "transactions" do
     defmodule NoTransactionAdapter do
       @behaviour Ecto.Adapter
@@ -902,6 +1300,128 @@ defmodule Ecto.RepoTest do
       refute function_exported?(NoTransactionRepo, :transaction, 2)
       refute function_exported?(NoTransactionRepo, :in_transaction?, 2)
       refute function_exported?(NoTransactionRepo, :rollback, 1)
+    end
+  end
+
+  describe "dynamic repo" do
+    setup do
+      {:ok, pid} = TestRepo.start_link(name: nil)
+      TestRepo = TestRepo.put_dynamic_repo(pid)
+      :ok
+    end
+
+    test "puts the dynamic repo in pdict" do
+      assert is_pid TestRepo.get_dynamic_repo()
+
+      assert Task.async(fn -> TestRepo.get_dynamic_repo() end) |> Task.await() ==
+               TestRepo
+    end
+
+    test "keeps the proper repo in prepare_changes callback" do
+      %MySchema{id: 1}
+      |> Ecto.Changeset.cast(%{x: "one"}, [:x])
+      |> Ecto.Changeset.prepare_changes(fn changeset ->
+        Process.put(:ecto_prepared, true)
+        assert changeset.repo == TestRepo
+        changeset
+      end)
+      |> TestRepo.insert!()
+
+      assert Process.get(:ecto_prepared)
+    end
+
+    test "keeps the proper repo in  multi" do
+      fun = fn repo, _changes -> {:ok, repo} end
+      multi = Ecto.Multi.new() |> Ecto.Multi.run(:run, fun)
+      assert {:ok, changes} = TestRepo.transaction(multi)
+      assert changes.run == TestRepo
+    end
+
+    test "accepts a default dynamic repo compile-time option" do
+      defmodule CustomDynamicRepo do
+        use Ecto.Repo, otp_app: :ecto, adapter: Ecto.TestAdapter, default_dynamic_repo: :other
+      end
+
+      assert CustomDynamicRepo.get_dynamic_repo() == :other
+    end
+  end
+
+  describe "read-only repo" do
+    test "accepts a read-only compile-time option" do
+      defmodule ReadOnlyRepo do
+        use Ecto.Repo, otp_app: :ecto, adapter: Ecto.TestAdapter, read_only: true
+      end
+
+      refute function_exported?(ReadOnlyRepo, :insert, 2)
+      refute function_exported?(ReadOnlyRepo, :update, 2)
+      refute function_exported?(ReadOnlyRepo, :delete, 2)
+      refute function_exported?(ReadOnlyRepo, :insert_all, 3)
+      refute function_exported?(ReadOnlyRepo, :update_all, 3)
+      refute function_exported?(ReadOnlyRepo, :delete_all, 2)
+    end
+  end
+
+  describe "prepare_for_query" do
+    defmodule PrepareRepo do
+      use Ecto.Repo, otp_app: :ecto, adapter: Ecto.TestAdapter
+
+      def prepare_query(op, query, opts) do
+        send(self(), {op, query, opts})
+        {%{query | prefix: "rewritten"}, opts}
+      end
+    end
+
+    setup do
+      _ = PrepareRepo.start_link(url: "ecto://user:pass@local/hello")
+      :ok
+    end
+
+    test "all" do
+      query = from p in MyParent, select: p
+
+      PrepareRepo.all(query, [hello: :world])
+      assert_received {:all, ^query, [hello: :world]}
+      assert_received {:all, %{prefix: "rewritten"}}
+
+      PrepareRepo.one(query, [hello: :world])
+      assert_received {:all, ^query, [hello: :world]}
+      assert_received {:all, %{prefix: "rewritten"}}
+    end
+
+    test "update_all" do
+      query = from p in MyParent, update: [set: [n: 1]]
+      PrepareRepo.update_all(query, [], [hello: :world])
+      assert_received {:update_all, ^query, [hello: :world]}
+      assert_received {:update_all, %{prefix: "rewritten"}}
+    end
+
+    test "delete_all" do
+      query = from p in MyParent
+      PrepareRepo.delete_all(query, [hello: :world])
+      assert_received {:delete_all, ^query, [hello: :world]}
+      assert_received {:delete_all, %{prefix: "rewritten"}}
+    end
+
+    test "stream" do
+      query = from p in MyParent, select: p
+      PrepareRepo.stream(query, [hello: :world]) |> Enum.to_list()
+      assert_received {:stream, ^query, [hello: :world]}
+      assert_received {:stream, %{prefix: "rewritten"}}
+    end
+  end
+
+  describe "transaction" do
+    test "an arity zero function will be executed any it's value returned" do
+      fun = fn -> :ok end
+      assert {:ok, :ok} = TestRepo.transaction(fun)
+      assert_received {:transaction, _}
+    end
+
+    test "an arity one function will be passed the repo as first argument" do
+      fun = fn repo -> repo end
+
+      assert {:ok, TestRepo} = TestRepo.transaction(fun)
+      assert_received {:transaction, _}
     end
   end
 end

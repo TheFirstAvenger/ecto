@@ -17,7 +17,12 @@ defmodule Ecto.Changeset.BelongsToTest do
         on_replace: :delete, defaults: [name: "default"]
       belongs_to :raise_profile, Profile, on_replace: :raise
       belongs_to :invalid_profile, Profile, on_replace: :mark_as_invalid
-      belongs_to :update_profile, Profile, on_replace: :update
+      belongs_to :update_profile, Profile, on_replace: :update, defaults: {__MODULE__, :send_to_self, [:extra]}
+    end
+
+    def send_to_self(struct, owner, extra) do
+      send(self(), {:defaults, struct, owner, extra})
+      %{struct | id: 13}
     end
   end
 
@@ -193,7 +198,6 @@ defmodule Ecto.Changeset.BelongsToTest do
     assert (changeset.types.profile |> elem(1)).on_cast == &Profile.optional_changeset/2
 
     profile = changeset.changes.profile
-    assert profile.data.name == "default"
     assert profile.data.__meta__.source == "authors_profiles"
     assert profile.changes == %{}
     assert profile.errors  == []
@@ -263,6 +267,23 @@ defmodule Ecto.Changeset.BelongsToTest do
     refute changeset.valid?
   end
 
+  test "cast belongs_to with keyword defaults" do
+    {:ok, schema} = TestRepo.insert(%Author{title: "Title", profile: nil})
+
+    changeset = cast(schema, %{"profile" => %{id: 1}}, :profile)
+    assert changeset.changes.profile.data.name == "default"
+    assert changeset.changes.profile.changes == %{id: 1}
+  end
+
+  test "cast belongs_to with MFA defaults" do
+    {:ok, schema} = TestRepo.insert(%Author{title: "Title", update_profile: nil})
+
+    changeset = cast(schema, %{"update_profile" => %{name: "Jose"}}, :update_profile)
+    assert_received {:defaults, %Profile{id: nil}, %Author{title: "Title"}, :extra}
+    assert changeset.changes.update_profile.data.id == 13
+    assert changeset.changes.update_profile.changes == %{name: "Jose"}
+  end
+
   test "cast belongs_to with on_replace: :update" do
     {:ok, schema} = TestRepo.insert(%Author{title: "Title",
       update_profile: %Profile{id: 1, name: "Enio"}})
@@ -294,10 +315,9 @@ defmodule Ecto.Changeset.BelongsToTest do
 
   test "change belongs_to" do
     assoc = Author.__schema__(:association, :profile)
-    assert {:ok, nil, true} =
-      Relation.change(assoc, nil, %Profile{})
-    assert {:ok, nil, true} =
-      Relation.change(assoc, nil, nil)
+
+    assert {:ok, nil, true} = Relation.change(assoc, nil, nil)
+    assert {:ok, nil, true} = Relation.change(assoc, nil, %Profile{})
 
     assoc_schema = %Profile{}
     assoc_schema_changeset = Changeset.change(assoc_schema, name: "michal")
@@ -453,6 +473,40 @@ defmodule Ecto.Changeset.BelongsToTest do
     refute Map.has_key?(changeset.changes, :profile)
   end
 
+  test "put_assoc/4 with empty" do
+    # On unloaded
+    changeset =
+      %Author{}
+      |> Changeset.change()
+      |> Changeset.put_assoc(:profile, nil)
+
+    assert Map.has_key?(changeset.changes, :profile)
+
+    # On empty
+    changeset =
+      %Author{profile: nil}
+      |> Changeset.change()
+      |> Changeset.put_assoc(:profile, nil)
+
+    refute Map.has_key?(changeset.changes, :profile)
+
+    # On unloaded with change
+    changeset =
+      %Author{}
+      |> Changeset.change(profile: %Profile{})
+      |> Changeset.put_assoc(:profile, nil)
+
+    assert Map.has_key?(changeset.changes, :profile)
+
+    # On emptuy with change
+    changeset =
+      %Author{profile: nil}
+      |> Changeset.change(profile: %Profile{})
+      |> Changeset.put_assoc(:profile, nil)
+
+    refute Map.has_key?(changeset.changes, :profile)
+  end
+
   test "put_change/3" do
     changeset = Changeset.change(%Author{}, profile: %Profile{name: "michal"})
     assert %Ecto.Changeset{} = changeset.changes.profile
@@ -493,7 +547,7 @@ defmodule Ecto.Changeset.BelongsToTest do
     changeset = Changeset.change(%Profile{}, name: "michal")
     assert Relation.apply_changes(embed, changeset) == %Profile{name: "michal"}
 
-    changeset = Changeset.change(%Profile{}, title: "hello")
+    changeset = Changeset.change(%Profile{}, name: "hello")
     changeset2 = %{changeset | action: :delete}
     assert Relation.apply_changes(embed, changeset2) == nil
   end

@@ -46,14 +46,18 @@ defmodule Ecto.QueryTest do
       end
     end
 
-    test "does not allow nils in comparison at runtime" do
-      assert_raise ArgumentError, ~r"comparison with nil is forbidden as it is unsafe", fn ->
-        Post |> where([p], p.title == ^nil)
+    test "does not allow interpolated nils at runtime" do
+      assert_raise ArgumentError,
+                   ~r"comparison with nil is forbidden as it is unsafe", fn ->
+        id = nil
+        from p in "posts", where: [id: ^id]
       end
     end
   end
 
   describe "from" do
+    @compile {:no_warn_undefined, NotASchema}
+
     test "does not allow non-queryable" do
       assert_raise Protocol.UndefinedError, fn ->
         from(p in 123, []) |> select([p], p.title)
@@ -91,9 +95,30 @@ defmodule Ecto.QueryTest do
     end
 
     test "applies prefix to the subquery's query if provided" do
+      assert subquery("posts", prefix: nil).query.prefix == nil
       assert subquery("posts", prefix: "my_prefix").query.prefix == "my_prefix"
       assert subquery(subquery("posts", prefix: "my_prefix")).query.prefix == "my_prefix"
       assert subquery(subquery("posts", prefix: "my_prefix").query).query.prefix == "my_prefix"
+    end
+  end
+
+  describe "common table expressions" do
+    test "recursive CTE" do
+      initial = "categories" |> where([c], is_nil(c.parent_id))
+      recursion = "categories" |> join(:inner, [c], ct in "tree", on: c.parent_id == ct.id)
+      tree = initial |> union_all(^recursion)
+      query = "products" |> recursive_ctes(true) |> with_cte("tree", as: ^tree)
+
+      assert [{"tree", ^tree}] = query.with_ctes.queries
+      assert query.with_ctes.recursive
+    end
+
+    test "fragment CTE" do
+      query = "products" |> with_cte("categories", as: fragment("SELECT * FROM categories"))
+
+      assert [{"categories", %Ecto.Query.QueryExpr{expr: expr}}] = query.with_ctes.queries
+      assert {:fragment, [], [raw: "SELECT * FROM categories"]} = expr
+      refute query.with_ctes.recursive
     end
   end
 
@@ -104,8 +129,8 @@ defmodule Ecto.QueryTest do
 
       query =
         "posts"
-        |> union(union_query1)
-        |> union_all(union_query2)
+        |> union(^union_query1)
+        |> union_all(^union_query2)
 
       assert {:union, ^union_query1} = query.combinations |> Enum.at(0)
       assert {:union_all, ^union_query2} = query.combinations |> Enum.at(1)
@@ -117,8 +142,8 @@ defmodule Ecto.QueryTest do
 
       query =
         "posts"
-        |> except(except_query1)
-        |> except_all(except_query2)
+        |> except(^except_query1)
+        |> except_all(^except_query2)
 
       assert {:except, ^except_query1} = query.combinations |> Enum.at(0)
       assert {:except_all, ^except_query2} = query.combinations |> Enum.at(1)
@@ -130,8 +155,8 @@ defmodule Ecto.QueryTest do
 
       query =
         "posts"
-        |> intersect(intersect_query1)
-        |> intersect_all(intersect_query2)
+        |> intersect(^intersect_query1)
+        |> intersect_all(^intersect_query2)
 
       assert {:intersect, ^intersect_query1} = query.combinations |> Enum.at(0)
       assert {:intersect_all, ^intersect_query2} = query.combinations |> Enum.at(1)
@@ -251,11 +276,10 @@ defmodule Ecto.QueryTest do
 
     test "dynamic in :on takes new binding when ... is used" do
       join_on = dynamic([p, ..., c], c.text == "Test Comment")
-
       query = from p in "posts", join: c in "comments", on: ^join_on
 
       assert inspect(query) ==
-        ~s[#Ecto.Query<from p in \"posts\", join: c in \"comments\", on: c.text == \"Test Comment\">]
+        ~s[#Ecto.Query<from p0 in \"posts\", join: c1 in \"comments\", on: c1.text == \"Test Comment\">]
     end
   end
 
@@ -298,6 +322,12 @@ defmodule Ecto.QueryTest do
       assert_raise Ecto.Query.CompileError, message, fn ->
         quote_and_eval(from(p in "posts", as: "post"))
       end
+    end
+
+    test "is not type checked but emits typed params" do
+      query = from "addresses", as: :address
+      query = where(query, [address: q], field(q, ^:foo) == ago(^1, "year"))
+      assert hd(query.wheres).params != []
     end
 
     test "crashes on duplicate as for keyword query" do
@@ -345,7 +375,7 @@ defmodule Ecto.QueryTest do
         |> where([comment: c], c.id == 0)
 
       assert inspect(query) ==
-        ~s[#Ecto.Query<from p in \"posts\", join: c in \"comments\", as: :comment, on: true, where: c.id == 0>]
+        ~s[#Ecto.Query<from p0 in \"posts\", join: c1 in \"comments\", as: :comment, on: true, where: c1.id == 0>]
     end
 
     test "match on binding by name for source" do
@@ -354,7 +384,7 @@ defmodule Ecto.QueryTest do
         |> where([post: p], p.id == 0)
 
       assert inspect(query) ==
-        ~s[#Ecto.Query<from p in \"posts\", as: :post, where: p.id == 0>]
+        ~s[#Ecto.Query<from p0 in \"posts\", as: :post, where: p0.id == 0>]
     end
 
     test "match on binding by name for source and join" do
@@ -365,7 +395,7 @@ defmodule Ecto.QueryTest do
         |> update([comment: c], set: [id: c.id + 1])
 
       assert inspect(query) ==
-        ~s{#Ecto.Query<from p in "posts", as: :post, join: c in "comments", as: :comment, on: true, update: [set: [id: c.id + 1]]>}
+        ~s{#Ecto.Query<from p0 in "posts", as: :post, join: c1 in "comments", as: :comment, on: true, update: [set: [id: c1.id + 1]]>}
     end
 
     test "match on binding by name with ... in the middle" do
@@ -376,10 +406,10 @@ defmodule Ecto.QueryTest do
         |> where([p, ..., authors: a], a.id == 0)
 
       assert inspect(query) ==
-        ~s[#Ecto.Query<from p in \"posts\", join: c in \"comments\", on: true, join: a in \"authors\", as: :authors, on: true, where: a.id == 0>]
+        ~s[#Ecto.Query<from p0 in \"posts\", join: c1 in \"comments\", on: true, join: a2 in \"authors\", as: :authors, on: true, where: a2.id == 0>]
     end
 
-    test "referring to non-existing binding" do
+    test "crashes on non-existing binding" do
       assert_raise Ecto.QueryError, ~r"unknown bind name `:nope`", fn ->
         "posts"
         |> join(:inner, [p], c in "comments", as: :comment)
@@ -387,7 +417,7 @@ defmodule Ecto.QueryTest do
       end
     end
 
-    test "named bind not in tail of the list" do
+    test "crashes on bind not in tail of the list" do
       message = ~r"tuples must be at the end of the binding list"
       assert_raise Ecto.Query.CompileError, message, fn ->
       quote_and_eval(
@@ -398,12 +428,24 @@ defmodule Ecto.QueryTest do
       end
     end
 
+    test "dynamic bind" do
+      assoc = :comment
+
+      query =
+        "posts"
+        |> join(:inner, [p], c in "comments", as: :comment)
+        |> where([{^assoc, c}], c.id == 0)
+
+      assert inspect(query) ==
+        ~s[#Ecto.Query<from p0 in \"posts\", join: c1 in \"comments\", as: :comment, on: true, where: c1.id == 0>]
+    end
+
     test "dynamic in :on takes new binding when alias is used" do
       join_on = dynamic([p, comment: c], c.text == "Test Comment")
       query = from p in "posts", join: c in "comments", as: :comment, on: ^join_on
 
       assert inspect(query) ==
-        ~s[#Ecto.Query<from p in \"posts\", join: c in \"comments\", as: :comment, on: c.text == \"Test Comment\">]
+        ~s[#Ecto.Query<from p0 in \"posts\", join: c1 in \"comments\", as: :comment, on: c1.text == \"Test Comment\">]
     end
   end
 
@@ -530,10 +572,10 @@ defmodule Ecto.QueryTest do
           where: p.id == 0 and b.id == 0,
           or_where: c.id == 0,
           order_by: p.title,
-          union: from(p in "posts"),
-          union_all: from(p in "posts"),
-          except: from(p in "posts"),
-          intersect: from(p in "posts"),
+          union: ^from(p in "posts"),
+          union_all: ^from(p in "posts"),
+          except: ^from(p in "posts"),
+          intersect: ^from(p in "posts"),
           limit: 2,
           offset: 10,
           group_by: p.author,
@@ -543,7 +585,10 @@ defmodule Ecto.QueryTest do
           select: p
         )
 
+      query = query |> with_cte("cte", as: ^from(p in "posts"))
+
       # Pre-exclusion assertions
+      refute query.with_ctes == base.with_ctes
       refute query.joins == base.joins
       refute query.wheres == base.wheres
       refute query.order_bys == base.order_bys
@@ -558,6 +603,7 @@ defmodule Ecto.QueryTest do
 
       excluded_query =
         query
+        |> exclude(:with_ctes)
         |> exclude(:join)
         |> exclude(:where)
         |> exclude(:order_by)
@@ -571,6 +617,7 @@ defmodule Ecto.QueryTest do
         |> exclude(:lock)
 
       # Post-exclusion assertions
+      assert excluded_query.with_ctes == base.with_ctes
       assert excluded_query.joins == base.joins
       assert excluded_query.wheres == base.wheres
       assert excluded_query.order_bys == base.order_bys
@@ -662,6 +709,74 @@ defmodule Ecto.QueryTest do
       excluded_left_lateral_query = exclude(left_lateral_query, :left_lateral_join)
       assert excluded_left_lateral_query.joins == base.joins
     end
+
+    test "removes join qualifiers with named bindings" do
+      query =
+        from p in "posts", as: :base,
+          inner_join: bi in "blogs",
+          as: :blogs_i,
+          cross_join: bc in "blogs",
+          as: :blogs_c,
+          left_join: bl in "blogs",
+          as: :blogs_l,
+          right_join: br in "blogs",
+          as: :blogs_r,
+          full_join: bf in "blogs",
+          as: :blogs_f,
+          inner_lateral_join: bil in "blogs",
+          as: :blogs_il,
+          left_lateral_join: bll in "blogs",
+          as: :blogs_ll
+
+      original_joins_number = length(query.joins)
+      original_aliases_number = map_size(query.aliases)
+
+      excluded_inner_join_query = exclude(query, :inner_join)
+      assert length(excluded_inner_join_query.joins) == original_joins_number - 1
+      assert map_size(excluded_inner_join_query.aliases) == original_aliases_number - 1
+      refute Map.has_key?(excluded_inner_join_query.aliases, :blogs_i)
+      assert Map.has_key?(excluded_inner_join_query.aliases, :base)
+
+      excluded_cross_join_query = exclude(query, :cross_join)
+      assert length(excluded_cross_join_query.joins) == original_joins_number - 1
+      assert map_size(excluded_cross_join_query.aliases) == original_aliases_number - 1
+      refute Map.has_key?(excluded_cross_join_query.aliases, :blogs_c)
+      assert Map.has_key?(excluded_cross_join_query.aliases, :base)
+
+      excluded_left_join_query = exclude(query, :left_join)
+      assert length(excluded_left_join_query.joins) == original_joins_number - 1
+      assert map_size(excluded_left_join_query.aliases) == original_aliases_number - 1
+      refute Map.has_key?(excluded_left_join_query.aliases, :blogs_l)
+      assert Map.has_key?(excluded_left_join_query.aliases, :base)
+
+      excluded_right_join_query = exclude(query, :right_join)
+      assert length(excluded_right_join_query.joins) == original_joins_number - 1
+      assert map_size(excluded_right_join_query.aliases) == original_aliases_number - 1
+      refute Map.has_key?(excluded_right_join_query.aliases, :blogs_r)
+      assert Map.has_key?(excluded_right_join_query.aliases, :base)
+
+      excluded_full_join_query = exclude(query, :full_join)
+      assert length(excluded_full_join_query.joins) == original_joins_number - 1
+      assert map_size(excluded_full_join_query.aliases) == original_aliases_number - 1
+      refute Map.has_key?(excluded_full_join_query.aliases, :blogs_f)
+      assert Map.has_key?(excluded_full_join_query.aliases, :base)
+
+      excluded_inner_lateral_join_query = exclude(query, :inner_lateral_join)
+      assert length(excluded_inner_lateral_join_query.joins) == original_joins_number - 1
+      assert map_size(excluded_inner_lateral_join_query.aliases) == original_aliases_number - 1
+      refute Map.has_key?(excluded_inner_lateral_join_query.aliases, :blogs_il)
+      assert Map.has_key?(excluded_inner_lateral_join_query.aliases, :base)
+
+      excluded_left_lateral_join_query = exclude(query, :left_lateral_join)
+      assert length(excluded_left_lateral_join_query.joins) == original_joins_number - 1
+      assert map_size(excluded_left_lateral_join_query.aliases) == original_aliases_number - 1
+      refute Map.has_key?(excluded_left_lateral_join_query.aliases, :blogs_ll)
+      assert Map.has_key?(excluded_left_lateral_join_query.aliases, :base)
+
+      excluded_all_joins_query = exclude(query, :join)
+      assert excluded_all_joins_query.joins == []
+      assert Map.has_key?(excluded_all_joins_query.aliases, :base)
+    end
   end
 
   describe "fragment/1" do
@@ -681,7 +796,7 @@ defmodule Ecto.QueryTest do
 
     test "keeps UTF-8 encoding" do
       assert inspect(from p in "posts", where: fragment("héllò")) ==
-             ~s[#Ecto.Query<from p in \"posts\", where: fragment("héllò")>]
+             ~s[#Ecto.Query<from p0 in \"posts\", where: fragment("héllò")>]
     end
   end
 
@@ -710,9 +825,30 @@ defmodule Ecto.QueryTest do
     end
 
     test "casts queryable to query" do
-      assert_raise Protocol.UndefinedError, "protocol Ecto.Queryable not implemented for []", fn ->
-        has_named_binding?([], :posts)
+      assert_raise Protocol.UndefinedError,
+                   ~r"protocol Ecto.Queryable not implemented for \[\]",
+                   fn -> has_named_binding?([], :posts) end
+    end
+  end
+
+  describe "reverse_order/1" do
+    defmodule ReverseOrder do
+      use Ecto.Schema
+      schema "reverse_order" do
       end
+    end
+
+    test "reverses the order of a simple query" do
+      order_bys = [asc: :inserted_at, desc: :id]
+      reversed_order_bys = [desc: :inserted_at, asc: :id]
+      q = from(p in "posts")
+      assert inspect(reverse_order(order_by(q, ^order_bys))) ==
+             inspect(order_by(q, ^reversed_order_bys))
+    end
+
+    test "reverses by primary key with no order" do
+      q = from(p in ReverseOrder)
+      assert inspect(reverse_order(q)) == inspect(order_by(q, desc: :id))
     end
   end
 end

@@ -108,10 +108,6 @@ This tells our application about the repo, which will allow us to run commands s
 
 We've now configured our application so that it's able to make queries to our database. Let's now create our database, add a table to it, and then perform some queries.
 
-## Test Environment Setup
-
-The test environment setup is described [here](testing-with-ecto.html).
-
 ## Setting up the database
 
 To be able to query a database, it first needs to exist. We can create the database with this command:
@@ -398,19 +394,29 @@ Friends.Repo.insert! Friends.Person.changeset(%Friends.Person{}, %{first_name: "
 
 ** (Ecto.InvalidChangesetError) could not perform insert because changeset is invalid.
 
-* Changeset changes
+Errors
 
-%{first_name: "Ryan"}
+    %{last_name: [{"can't be blank", [validation: :required]}]}
 
-* Changeset params
+Applied changes
 
-%{"first_name" => "Ryan"}
+    %{first_name: "Ryan"}
 
-* Changeset errors
+Params
 
-[last_name: "can't be blank"]
+    %{"first_name" => "Ryan"}
 
-    lib/ecto/repo/schema.ex:111: Ecto.Repo.Schema.insert!/4
+Changeset
+
+    #Ecto.Changeset<
+      action: :insert,
+      changes: %{first_name: "Ryan"},
+      errors: [last_name: {"can't be blank", [validation: :required]}],
+      data: #Friends.Person<>,
+      valid?: false
+    >
+
+   lib/ecto/repo/schema.ex:169: Ecto.Repo.Schema.insert!/4
 ```
 
 This exception shows us the changes from the changeset, and how the changeset is invalid. This can be useful if you want to insert a bunch of data and then have an exception raised if that data is not inserted correctly at all.

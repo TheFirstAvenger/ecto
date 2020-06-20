@@ -7,43 +7,43 @@ defmodule Ecto.Query.Builder.SelectTest do
 
   describe "escape" do
     test "handles expressions and params" do
-      assert {Macro.escape(quote do &0 end), {%{}, %{}}} ==
+      assert {Macro.escape(quote do &0 end), {[], %{}}} ==
              escape(quote do x end, [x: 0], __ENV__)
 
-      assert {Macro.escape(quote do &0.y end), {%{}, %{}}} ==
-             escape(quote do x.y end, [x: 0], __ENV__)
+      assert {Macro.escape(quote do &0.y() end), {[], %{}}} ==
+             escape(quote do x.y() end, [x: 0], __ENV__)
 
-      assert {Macro.escape(quote do &0 end), {%{}, %{0 => {:any, [:foo, :bar, baz: :bat]}}}} ==
+      assert {Macro.escape(quote do &0 end), {[], %{0 => {:any, [:foo, :bar, baz: :bat]}}}} ==
              escape(quote do [:foo, :bar, baz: :bat] end, [x: 0], __ENV__)
 
-      assert {Macro.escape(quote do &0 end), {%{}, %{0 => {:struct, [:foo, :bar, baz: :bat]}}}} ==
+      assert {Macro.escape(quote do &0 end), {[], %{0 => {:struct, [:foo, :bar, baz: :bat]}}}} ==
              escape(quote do struct(x, [:foo, :bar, baz: :bat]) end, [x: 0], __ENV__)
 
-      assert {Macro.escape(quote do &0 end), {%{}, %{0 => {:map, [:foo, :bar, baz: :bat]}}}} ==
+      assert {Macro.escape(quote do &0 end), {[], %{0 => {:map, [:foo, :bar, baz: :bat]}}}} ==
              escape(quote do map(x, [:foo, :bar, baz: :bat]) end, [x: 0], __ENV__)
 
-      assert {{:{}, [], [:{}, [], [0, 1, 2]]}, {%{}, %{}}} ==
+      assert {{:{}, [], [:{}, [], [0, 1, 2]]}, {[], %{}}} ==
              escape(quote do {0, 1, 2} end, [], __ENV__)
 
-      assert {{:{}, [], [:%{}, [], [a: {:{}, [], [:&, [], [0]]}]]}, {%{}, %{}}} ==
+      assert {{:{}, [], [:%{}, [], [a: {:{}, [], [:&, [], [0]]}]]}, {[], %{}}} ==
              escape(quote do %{a: a} end, [a: 0], __ENV__)
 
-      assert {{:{}, [], [:%{}, [], [{{:{}, [], [:&, [], [0]]}, {:{}, [], [:&, [], [1]]}}]]}, {%{}, %{}}} ==
+      assert {{:{}, [], [:%{}, [], [{{:{}, [], [:&, [], [0]]}, {:{}, [], [:&, [], [1]]}}]]}, {[], %{}}} ==
              escape(quote do %{a => b} end, [a: 0, b: 1], __ENV__)
 
-      assert {[Macro.escape(quote do &0.y end), Macro.escape(quote do &0.z end)], {%{}, %{}}} ==
-             escape(quote do [x.y, x.z] end, [x: 0], __ENV__)
+      assert {[Macro.escape(quote do &0.y() end), Macro.escape(quote do &0.z() end)], {[], %{}}} ==
+             escape(quote do [x.y(), x.z()] end, [x: 0], __ENV__)
 
       assert {[{:{}, [], [{:{}, [], [:., [], [{:{}, [], [:&, [], [0]]}, :y]]}, [], []]},
-               {:{}, [], [:^, [], [0]]}], {%{0 => {1, :any}}, %{}}} ==
-              escape(quote do [x.y, ^1] end, [x: 0], __ENV__)
+               {:{}, [], [:^, [], [0]]}], {[{1, :any}], %{}}} ==
+              escape(quote do [x.y(), ^1] end, [x: 0], __ENV__)
 
-      assert {{:{}, [], [:%, [], [Foo, {:{}, [], [:%{}, [], [a: {:{}, [], [:&, [], [0]]}]]}]]}, {%{}, %{}}} ==
+      assert {{:{}, [], [:%, [], [Foo, {:{}, [], [:%{}, [], [a: {:{}, [], [:&, [], [0]]}]]}]]}, {[], %{}}} ==
              escape(quote do %Foo{a: a} end, [a: 0], __ENV__)
     end
 
     test "on conflicting take" do
-      assert {_, {%{}, %{0 => {:map, [:foo, :bar, baz: :bat]}}}} =
+      assert {_, {[], %{0 => {:map, [:foo, :bar, baz: :bat]}}}} =
              escape(quote do {map(x, [:foo, :bar]), map(x, [baz: :bat])} end, [x: 0], __ENV__)
 
       assert_raise Ecto.Query.CompileError,
@@ -59,6 +59,14 @@ defmodule Ecto.Query.Builder.SelectTest do
       fields = ~w[field]a
       assert select("q", [q], map(q, ~w[field]a)).select.take == %{0 => {:map, fields}}
       assert select("q", [q], struct(q, @fields)).select.take == %{0 => {:struct, fields}}
+    end
+
+    test "raises on single atom" do
+      assert_raise Ecto.Query.CompileError,
+                   ~r":foo is not a valid query expression, :select expects a query expression or a list of fields",
+                   fn ->
+        escape(quote do :foo end, [x: 0], __ENV__)
+      end
     end
   end
 
@@ -86,7 +94,7 @@ defmodule Ecto.Query.Builder.SelectTest do
           select_merge: %{a: map(p, [:title]), b: ^0},
           select_merge: %{c: map(p, [:title, :body]), d: ^1}
 
-      assert Macro.to_string(query.select.expr) == "merge(%{a: &0, b: ^0}, %{c: &0, d: ^0})"
+      assert Macro.to_string(query.select.expr) == "merge(%{a: &0, b: ^0}, %{c: &0, d: ^1})"
       assert query.select.params == [{0, :any}, {1, :any}]
       assert query.select.take == %{0 => {:map, [:title, :body]}}
     end
@@ -98,7 +106,7 @@ defmodule Ecto.Query.Builder.SelectTest do
         |> select_merge([p], %{a: map(p, [:title]), b: ^0})
         |> select_merge([p], %{c: map(p, [:title, :body]), d: ^1})
 
-      assert Macro.to_string(query.select.expr) == "merge(%{a: &0, b: ^0}, %{c: &0, d: ^0})"
+      assert Macro.to_string(query.select.expr) == "merge(%{a: &0, b: ^0}, %{c: &0, d: ^1})"
       assert query.select.params == [{0, :any}, {1, :any}]
       assert query.select.take == %{0 => {:map, [:title, :body]}}
     end
@@ -113,6 +121,58 @@ defmodule Ecto.Query.Builder.SelectTest do
       assert Macro.to_string(query.select.expr) == "merge(&0, %{body: ^0})"
       assert query.select.params == [{"body", :any}]
       assert query.select.take == %{0 => {:map, [:title]}}
+    end
+
+    test "merges at the root with interpolated fields" do
+      fields = [:title]
+
+      query =
+        "posts"
+        |> select([], %{})
+        |> select_merge([p], map(p, ^fields))
+        |> select_merge([p], %{body: ^"body"})
+
+      assert Macro.to_string(query.select.expr) == "merge(&0, %{body: ^0})"
+      assert query.select.params == [{"body", :any}]
+      assert query.select.take == %{0 => {:map, [:title]}}
+    end
+
+    test "merges at the root with interpolated fields with explicit merge" do
+      fields = [:title]
+
+      query = select("posts", [p], merge(map(p, ^fields), %{body: ^"body"}))
+      assert Macro.to_string(query.select.expr) == "merge(&0, %{body: ^0})"
+      assert query.select.params == [{"body", :any}]
+      assert query.select.take == %{0 => {:map, [:title]}}
+
+      query = select("posts", [p], merge(%{body: ^"body"}, map(p, ^fields)))
+      assert Macro.to_string(query.select.expr) == "merge(%{body: ^0}, &0)"
+      assert query.select.params == [{"body", :any}]
+      assert query.select.take == %{0 => {:map, [:title]}}
+    end
+
+    test "merges dynamically" do
+      query =
+        from(b in "blogs",
+          as: :blog,
+          join: p in "posts",
+          as: :post,
+          on: p.blog_id == b.id,
+          join: c in "comments",
+          as: :comment,
+          on: c.post_id == p.id,
+          select: %{comments: count(c.id)}
+        )
+
+      query =
+        Enum.reduce([blog: :name, post: :author], query, fn {binding, field}, query ->
+          query
+          |> select_merge([{^binding, bound}], %{^field => field(bound, ^field)})
+          |> group_by([{^binding, bound}], field(bound, ^field))
+        end)
+
+      assert Macro.to_string(query.select.expr) ==
+               "merge(merge(%{comments: count(&2.id())}, %{^0 => &0.name()}), %{^1 => &1.author()})"
     end
 
     test "supports '...' in binding list with no prior select" do

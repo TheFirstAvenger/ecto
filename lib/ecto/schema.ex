@@ -100,16 +100,17 @@ defmodule Ecto.Schema do
 
   ## Schema attributes
 
-  Supported attributes, to be set beforehand, for configuring the defined schema.
+  Supported attributes for configuring the defined schema. They must
+  be set after the `use Ecto.Schema` call and before the `schema/2`
+  definition.
 
   These attributes are:
 
     * `@primary_key` - configures the schema primary key. It expects
       a tuple `{field_name, type, options}` with the primary key field
       name, type (typically `:id` or `:binary_id`, but can be any type) and
-      options. Defaults to `{:id, :id, autogenerate: true}`. When set
-      to `false`, does not define a primary key in the schema unless
-      composite keys are defined using the options of `field`.
+      options. It also accepts `false` to disable the generation of a primary
+      key field. Defaults to `{:id, :id, autogenerate: true}`.
 
     * `@schema_prefix` - configures the schema prefix. Defaults to `nil`,
       which generates structs and queries without prefix. When set, the
@@ -119,7 +120,8 @@ defmodule Ecto.Schema do
       In MySQL the prefix points to databases.
 
     * `@foreign_key_type` - configures the default foreign key type
-      used by `belongs_to` associations. Defaults to `:id`;
+      used by `belongs_to` associations. It must be set in the same
+      module that defines the `belongs_to`. Defaults to `:id`;
 
     * `@timestamps_opts` - configures the default timestamps type
       used by `timestamps`. Defaults to `[type: :naive_datetime]`;
@@ -139,7 +141,7 @@ defmodule Ecto.Schema do
 
   For example, if your database does not support autoincrementing
   primary keys and requires something like UUID or a RecordID, you
-  can configure and use`:binary_id` as your primary key type as follows:
+  can configure and use `:binary_id` as your primary key type as follows:
 
       # Define a module to be used as base
       defmodule MyApp.Schema do
@@ -185,24 +187,22 @@ defmodule Ecto.Schema do
   auto-generation of the id. This is often the case for primary keys
   in relational databases which are auto-incremented.
 
-  Similarly, the `:binary_id` type may be generated in the adapter
-  for cases like UUID but it may also be handled by the database if
-  required. In any case, both scenarios are handled transparently by
-  Ecto.
+  There are two ways to define primary keys in Ecto: using the `@primary_key`
+  module attribute and using `primary_key: true` as option for `field/3` in
+  your schema definition. They are not mutually exclusive and can be used
+  together.
+
+  Using `@primary_key` should be prefered for single field primary keys and
+  sharing primary key definitions between multiple schemas using macros.
+
+  Ecto also supports composite primary keys, which is where you need to use
+  `primary_key: true` for the fields in your schema. This usually goes along
+  with setting `@primary_key false` to disable generation of additional
+  primary key fields.
 
   Besides `:id` and `:binary_id`, which are often used by primary
   and foreign keys, Ecto provides a huge variety of types to be used
-  by any column.
-
-  Ecto also supports composite primary keys.
-
-  If your primary key is not named "id" (e.g. if you are working with a
-  legacy database), you can use the `@primary_key` attribute to configure
-  your key name using the `source` option.  For example, the following
-  attribute defines an integer primary key named `legacy_id` which is
-  automatically incremented by the database:
-
-      @primary_key {:id, :integer, autogenerate: false, source: :legacy_id}
+  by any field.
 
   ## Types and casting
 
@@ -228,6 +228,7 @@ defmodule Ecto.Schema do
   `:decimal`              | [`Decimal`](https://github.com/ericmj/decimal) |
   `:date`                 | `Date` |
   `:time`                 | `Time` |
+  `:time_usec`            | `Time` |
   `:naive_datetime`       | `NaiveDateTime` |
   `:naive_datetime_usec`  | `NaiveDateTime` |
   `:utc_datetime`         | `DateTime` |
@@ -281,12 +282,16 @@ defmodule Ecto.Schema do
       also casts values to `NaiveDateTime` with no timezone information.
 
     * `utc_datetime` - has a precision of seconds and casts values to
-      to Elixir's `DateTime` struct and expects the time zone to be set to UTC.
+      Elixir's `DateTime` struct and expects the time zone to be set to UTC.
 
     * `utc_datetime_usec` has a default precision of microseconds and also
       casts values to `DateTime` expecting the time zone be set to UTC.
 
-  Having these different types allows developers to choose a type that will
+  All of those types are represented by the same timestamp/datetime in the
+  underlying data storage, the difference are in their precision and how the
+  data is loaded into Elixir.
+
+  Having different precisions allows developers to choose a type that will
   be compatible with the database and your project's precision requirements.
   For example, some older versions of MySQL do not support microseconds in
   datetime fields.
@@ -319,8 +324,8 @@ defmodule Ecto.Schema do
 
   In order to support maps, different databases may employ different
   techniques. For example, PostgreSQL will store those values in jsonb
-  fields, allowing you to just query parts of it. MySQL and MSSQL, on
-  the other hand, do not yet provide a JSON type, so the value will be
+  fields, allowing you to just query parts of it. MSSQL, on
+  the other hand, does not yet provide a JSON type, so the value will be
   stored in a text field.
 
   For maps to work in such databases, Ecto will need a JSON library.
@@ -406,6 +411,10 @@ defmodule Ecto.Schema do
   @type schema :: %{optional(atom) => any, __struct__: atom, __meta__: Metadata.t}
   @type embedded_schema :: %{optional(atom) => any, __struct__: atom}
   @type t :: schema | embedded_schema
+  @type belongs_to(t) :: t | Ecto.Association.NotLoaded.t()
+  @type has_one(t) :: t | Ecto.Association.NotLoaded.t()
+  @type has_many(t) :: [t] | Ecto.Association.NotLoaded.t()
+  @type many_to_many(t) :: [t] | Ecto.Association.NotLoaded.t()
 
   @doc false
   defmacro __using__(_) do
@@ -420,6 +429,7 @@ defmodule Ecto.Schema do
 
       Module.register_attribute(__MODULE__, :ecto_primary_keys, accumulate: true)
       Module.register_attribute(__MODULE__, :ecto_fields, accumulate: true)
+      Module.register_attribute(__MODULE__, :ecto_query_fields, accumulate: true)
       Module.register_attribute(__MODULE__, :ecto_field_sources, accumulate: true)
       Module.register_attribute(__MODULE__, :ecto_assocs, accumulate: true)
       Module.register_attribute(__MODULE__, :ecto_embeds, accumulate: true)
@@ -443,7 +453,7 @@ defmodule Ecto.Schema do
   `@primary_key` attribute.
   """
   defmacro embedded_schema([do: block]) do
-    schema(nil, false, :binary_id, block)
+    schema(__CALLER__, nil, false, :binary_id, block)
   end
 
   @doc """
@@ -454,12 +464,18 @@ defmodule Ecto.Schema do
   as value and can be manipulated with the `Ecto.put_meta/2` function.
   """
   defmacro schema(source, [do: block]) do
-    schema(source, true, :id, block)
+    schema(__CALLER__, source, true, :id, block)
   end
 
-  defp schema(source, meta?, type, block) do
+  defp schema(caller, source, meta?, type, block) do
     prelude =
       quote do
+        if line = Module.get_attribute(__MODULE__, :ecto_schema_defined) do
+          raise "schema already defined for #{inspect(__MODULE__)} on line #{line}"
+        end
+
+        @ecto_schema_defined unquote(caller.line)
+
         @after_compile Ecto.Schema
         Module.register_attribute(__MODULE__, :changeset_fields, accumulate: true)
         Module.register_attribute(__MODULE__, :struct_fields, accumulate: true)
@@ -511,6 +527,7 @@ defmodule Ecto.Schema do
         autogenerate = @ecto_autogenerate |> Enum.reverse
         autoupdate = @ecto_autoupdate |> Enum.reverse
         fields = @ecto_fields |> Enum.reverse
+        query_fields = @ecto_query_fields |> Enum.reverse
         field_sources = @ecto_field_sources |> Enum.reverse
         assocs = @ecto_assocs |> Enum.reverse
         embeds = @ecto_embeds |> Enum.reverse
@@ -525,8 +542,9 @@ defmodule Ecto.Schema do
         def __schema__(:prefix), do: unquote(prefix)
         def __schema__(:source), do: unquote(source)
         def __schema__(:fields), do: unquote(Enum.map(fields, &elem(&1, 0)))
+        def __schema__(:query_fields), do: unquote(Enum.map(query_fields, &elem(&1, 0)))
         def __schema__(:primary_key), do: unquote(primary_key_fields)
-        def __schema__(:hash), do: unquote(:erlang.phash2({primary_key_fields, fields}))
+        def __schema__(:hash), do: unquote(:erlang.phash2({primary_key_fields, query_fields}))
         def __schema__(:read_after_writes), do: unquote(Enum.reverse(@ecto_raw))
         def __schema__(:autogenerate_id), do: unquote(Macro.escape(@ecto_autogenerate_id))
         def __schema__(:autogenerate), do: unquote(Macro.escape(autogenerate))
@@ -591,7 +609,11 @@ defmodule Ecto.Schema do
       `:read_after_writes`.
 
     * `:primary_key` - When true, the field is used as part of the
-      composite primary key
+      composite primary key.
+
+    * `:load_in_query` - When false, the field will not be loaded when
+      selecting the whole struct in a query, such as `from p in Post, select: p`.
+      Defaults to `true`.
 
   """
   defmacro field(name, type \\ :string, opts \\ []) do
@@ -608,9 +630,11 @@ defmodule Ecto.Schema do
 
   ## Options
 
+    * `:inserted_at` - the ecto schema name of the field for insertion times or `false`
+    * `:updated_at` - the ecto schema name of the field for update times or `false`
+    * `:inserted_at_source` - the name of the database column for insertion times or `false`
+    * `:updated_at_source` - the name of the database column for update times or `false`
     * `:type` - the timestamps type, defaults to `:naive_datetime`.
-    * `:inserted_at` - the name of the column for insertion times or `false`
-    * `:updated_at` - the name of the column for update times or `false`
     * `:autogenerate` - a module-function-args tuple used for generating
       both `inserted_at` and `updated_at` timestamps
 
@@ -618,39 +642,30 @@ defmodule Ecto.Schema do
   """
   defmacro timestamps(opts \\ []) do
     quote bind_quoted: binding() do
-      timestamps =
-        [inserted_at: :inserted_at, updated_at: :updated_at, type: :naive_datetime]
-        |> Keyword.merge(@timestamps_opts)
-        |> Keyword.merge(opts)
+      timestamps = Keyword.merge(@timestamps_opts, opts)
 
-      type = Keyword.fetch!(timestamps, :type)
+      type = Keyword.get(timestamps, :type, :naive_datetime)
       autogen = timestamps[:autogenerate] || {Ecto.Schema, :__timestamps__, [type]}
 
-      inserted_at = Keyword.fetch!(timestamps, :inserted_at)
-      updated_at = Keyword.fetch!(timestamps, :updated_at)
+      inserted_at = Keyword.get(timestamps, :inserted_at, :inserted_at)
+      updated_at = Keyword.get(timestamps, :updated_at, :updated_at)
 
       if inserted_at do
-        Ecto.Schema.field(inserted_at, type, [])
+        opts = if source = timestamps[:inserted_at_source], do: [source: source], else: []
+        Ecto.Schema.field(inserted_at, type, opts)
       end
 
       if updated_at do
-        Ecto.Schema.field(updated_at, type, [])
+        opts = if source = timestamps[:updated_at_source], do: [source: source], else: []
+        Ecto.Schema.field(updated_at, type, opts)
         Module.put_attribute(__MODULE__, :ecto_autoupdate, {[updated_at], autogen})
       end
 
-      cond do
-        inserted_at && updated_at ->
-          Module.put_attribute(__MODULE__, :ecto_autogenerate, {[inserted_at, updated_at], autogen})
-
-        inserted_at ->
-          Module.put_attribute(__MODULE__, :ecto_autogenerate, {[inserted_at], autogen})
-
-        updated_at ->
-          Module.put_attribute(__MODULE__, :ecto_autogenerate, {[updated_at], autogen})
-
-        true ->
-          :ok
+      with [_ | _] = fields <- Enum.filter([inserted_at, updated_at], & &1) do
+        Module.put_attribute(__MODULE__, :ecto_autogenerate, {fields, autogen})
       end
+
+      :ok
     end
   end
 
@@ -686,9 +701,16 @@ defmodule Ecto.Schema do
     * `:on_replace` - The action taken on associations when the record is
       replaced when casting or manipulating parent changeset. May be
       `:raise` (default), `:mark_as_invalid`, `:nilify`, or `:delete`.
-      See `Ecto.Changeset`'s section on related data for more info.
+      See `Ecto.Changeset`'s section about ":on_replace" for more info.
 
-    * `:defaults` - Default values to use when building the association
+    * `:defaults` - Default values to use when building the association.
+      It may be a keyword list of options that override the association schema
+      or a `{module, function, args}` that receive the struct and the owner as
+      arguments. For example, if you set `Post.has_many :comments, defaults: [public: true]`,
+      then when using `Ecto.build_assoc(post, :comments)` that comment will have
+      `comment.public == true`. Alternatively, you can set it to
+      `Post.has_many :comments, defaults: {__MODULE__, :update_comment, []}`
+      and `Post.update_comment(comment, post)` will be invoked.
 
     * `:where` - A filter for the association. See "Filtering associations" below.
       It does not apply to `:through` associations.
@@ -718,16 +740,16 @@ defmodule Ecto.Schema do
         schema "comments" do
           field :content, :string
           field :parent_id, :integer
-          belongs_to :parent, Comment, foreign_key: :id, references: :parent_id, define_field: false
+          belongs_to :parent, Comment, foreign_key: :parent_id, references: :id, define_field: false
           has_many :children, Comment, foreign_key: :parent_id, references: :id
         end
       end
 
   ## Filtering associations
 
-  A query can also be given instead of a schema. Querying, joining or preloading
-  the association will use the given query. Currently only where clauses can be
-  provided in queries. Let's see some examples:
+  It is possible to specify a `:where` option that will filter the records
+  returned by the association. Querying, joining or preloading the association
+  will use the given conditions as shown next:
 
       defmodule Post do
         use Ecto.Schema
@@ -735,30 +757,31 @@ defmodule Ecto.Schema do
         schema "posts" do
           has_many :public_comments, Comment,
             where: [public: true]
-
-          has_many :deleted_comments, Comment,
-            where: dynamic([c], not(is_nil(comment.deleted_at)))
         end
       end
 
-  The `:where` option may receive a dynamic query, a keyword list or a MFA
-  (a tuple with a module, function and args to invoke). The MFA is especially
-  useful to avoid duplication in those definitions:
+  The `:where` option expects a keyword list where the key is an atom
+  representing the field and the value is either:
 
-      defmodule Comment do
-        def deleted_filter do
-          dynamic([c], not(is_nil(comment.deleted_at)))
-        end
-      end
+    * `nil` - which specifies the field must be nil
+    * `{:not, nil}` - which specifies the field must not be nil
+    * `{:in, list}` - which specifies the field must be one of the values in a list
+    * `{:fragment, expr}` - which specifies a fragment string as the filter
+      (see `Ecto.Query.API.fragment/1`) with the field's value given to it
+      as the only argument
+    * or any other value which the field is compared directly against
 
-      defmodule Post do
-        use Ecto.Schema
+  Note the values above are distinctly different from the values you
+  would pass to `where` when building a query. For example, if you
+  attempt to build a query such as
 
-        schema "posts" do
-          has_many :deleted_comments, Comment,
-            where: {Comment, :deleted_filter, []}
-        end
-      end
+      from Post, where: [id: nil]
+
+  it will emit an error. This is because queries can be built dynamically,
+  and therefore passing `nil` can lead to security errors. However, the
+  `:where` values for an association are given at compile-time, which is
+  less dynamic and cannot leverage the full power of Ecto queries, which
+  explains why they have different APIs.
 
   **Important!** Please use this feature only when strictly necessary,
   otherwise it is very easy to end-up with large schemas with dozens of
@@ -824,17 +847,6 @@ defmodule Ecto.Schema do
       post = Repo.get(Post, 42)
       authors = Repo.all assoc(post, :comments_authors)
 
-  Although we used the `:through` association in the example above, Ecto
-  also allows developers to dynamically build the through associations using
-  the `Ecto.assoc/2` function:
-
-      assoc(post, [:comments, :author])
-
-  In fact, given `:through` associations are read-only, **using the `Ecto.assoc/2`
-  format is the preferred mechanism for working with through associations**. Use
-  the schema-based one only if you need to store the through data alongside of
-  the parent struct, in specific cases such as preloading.
-
   `:through` associations can also be preloaded. In such cases, not only
   the `:through` association is preloaded but all intermediate steps are
   preloaded too:
@@ -859,6 +871,8 @@ defmodule Ecto.Schema do
       [comment] = Repo.all(Comment) |> Repo.preload(:post_permalink)
       comment.post_permalink #=> %Permalink{...}
 
+  Note `:through` associations are read-only. For example, you cannot use
+  `Ecto.Changeset.cast_assoc/3` to modify through associations.
   """
   defmacro has_many(name, queryable, opts \\ []) do
     queryable = expand_alias(queryable, __CALLER__)
@@ -901,7 +915,14 @@ defmodule Ecto.Schema do
       `:raise` (default), `:mark_as_invalid`, `:nilify`, `:update`, or
       `:delete`. See `Ecto.Changeset`'s section on related data for more info.
 
-    * `:defaults` - Default values to use when building the association
+    * `:defaults` - Default values to use when building the association.
+      It may be a keyword list of options that override the association schema
+      or a `{module, function, args}` that receive the struct and the owner as
+      arguments. For example, if you set `Post.has_many :comments, defaults: [public: true]`,
+      then when using `Ecto.build_assoc(post, :comments)` that comment will have
+      `comment.public == true`. Alternatively, you can set it to
+      `Post.has_many :comments, defaults: {__MODULE__, :update_comment, []}`
+      and `Post.update_comment(comment, post)` will be invoked.
 
     * `:where` - A filter for the association. See "Filtering associations"
       in `has_many/3`. It does not apply to `:through` associations.
@@ -922,30 +943,6 @@ defmodule Ecto.Schema do
       # The permalink can come preloaded on the post struct
       [post] = Repo.all(from(p in Post, where: p.id == 42, preload: :permalink))
       post.permalink #=> %Permalink{...}
-
-  ## Using Queries as Associations
-
-  A query can also be given instead of a schema. Querying, joining or preloading the association will
-  use the given query. Currently only where clauses can be provided in queries. Let's see an example:
-
-      defmodule Post do
-        ...
-        def active() do
-          from post in Post,
-            where: post.active
-        end
-      end
-
-      defmodule Comment do
-        use Ecto.Schema
-        schema "comments" do
-          has_one :post, Post.active()
-        end
-      end
-
-  Note: building the association does not consider the query filters.
-  For example, if the given query requires the active field of the associated records to be true,
-  building such association won't automatically set the active field to true.
   """
   defmacro has_one(name, queryable, opts \\ []) do
     queryable = expand_alias(queryable, __CALLER__)
@@ -971,7 +968,9 @@ defmodule Ecto.Schema do
 
     * `:foreign_key` - Sets the foreign key field name, defaults to the name
       of the association suffixed by `_id`. For example, `belongs_to :company`
-      will define foreign key of `:company_id`
+      will define foreign key of `:company_id`. The associated `has_one` or `has_many`
+      field in the other schema should also have its `:foreign_key` option set
+      with the same value.
 
     * `:references` - Sets the key on the other schema to be used for the
       association, defaults to: `:id`
@@ -987,11 +986,18 @@ defmodule Ecto.Schema do
       `:raise` (default), `:mark_as_invalid`, `:nilify`, `:update`, or `:delete`.
       See `Ecto.Changeset`'s section on related data for more info.
 
-    * `:defaults` - Default values to use when building the association
+    * `:defaults` - Default values to use when building the association.
+      It may be a keyword list of options that override the association schema
+      or a `{module, function, args}` that receive the struct and the owner as
+      arguments. For example, if you set `Post.has_many :comments, defaults: [public: true]`,
+      then when using `Ecto.build_assoc(post, :comments)` that comment will have
+      `comment.public == true`. Alternatively, you can set it to
+      `Post.has_many :comments, defaults: {__MODULE__, :update_comment, []}`
+      and `Post.update_comment(comment, post)` will be invoked.
 
     * `:primary_key` - If the underlying belongs_to field is a primary key
 
-    * `:source` - The source for the underlying field
+    * `:source` - Defines the name that is to be used in database for this field
 
     * `:where` - A filter for the association. See "Filtering associations"
       in `has_many/3`.
@@ -1021,30 +1027,6 @@ defmodule Ecto.Schema do
           belongs_to :post, Post, define_field: false
         end
       end
-
-  ## Using Queries as Associations
-
-  A query can also be given instead of a schema. Querying, joining or preloading the association will
-  use the given query. Currently only where clauses can be provided in queries. Let's see an example:
-
-      defmodule Post do
-        ...
-        def active() do
-          from post in Post,
-            where: post.active
-        end
-      end
-
-      defmodule Comment do
-        use Ecto.Schema
-        schema "posts" do
-          belongs_to :post, Post.active()
-        end
-      end
-
-  Note: building the association does not consider the query filters.
-  For example, if the given query requires the active field of the associated records to be true,
-  building such association won't automatically set the active field to true.
 
   ## Polymorphic associations
 
@@ -1123,12 +1105,12 @@ defmodule Ecto.Schema do
       Repo.insert!(build_assoc(post, :comments))
 
   leveraging the `Ecto.build_assoc/3` function. You can also
-  use `Ecto.assoc/2` and `Ecto.Query.assoc/2` in the query syntax
+  use `Ecto.assoc/2` or pass a tuple in the query syntax
   to easily retrieve associated comments to a given post or
   task:
 
       # Fetch all comments associated with the given task
-      Repo.all(assoc(task, :comments))
+      Repo.all(Ecto.assoc(task, :comments))
 
   Or all comments in a given table:
 
@@ -1137,7 +1119,7 @@ defmodule Ecto.Schema do
   The third and final option is to use `many_to_many/3` to
   define the relationships between the resources. In this case,
   the comments table won't have the foreign key, instead there
-  is a intermediary table responsible for associating the entries:
+  is an intermediary table responsible for associating the entries:
 
       defmodule Comment do
         use Ecto.Schema
@@ -1194,12 +1176,12 @@ defmodule Ecto.Schema do
 
   ## Options
 
-    * `:join_through` - specifies the source of the associated data.
+    * `:join_through` - Specifies the source of the associated data.
       It may be a string, like "posts_tags", representing the
       underlying storage table or an atom, like `MyApp.PostTag`,
       representing a schema. This option is required.
 
-    * `:join_keys` - specifies how the schemas are associated. It
+    * `:join_keys` - Specifies how the schemas are associated. It
       expects a keyword list with two entries, the first being how
       the join table should reach the current schema and the second
       how the join table should reach the associated schema. In the
@@ -1222,19 +1204,32 @@ defmodule Ecto.Schema do
       associated records. See `Ecto.Changeset`'s section on related data
       for more info.
 
-    * `:defaults` - Default values to use when building the association
+    * `:defaults` - Default values to use when building the association.
+      It may be a keyword list of options that override the association schema
+      or a `{module, function, args}` that receive the struct and the owner as
+      arguments. For example, if you set `Post.has_many :comments, defaults: [public: true]`,
+      then when using `Ecto.build_assoc(post, :comments)` that comment will have
+      `comment.public == true`. Alternatively, you can set it to
+      `Post.has_many :comments, defaults: {__MODULE__, :update_comment, []}`
+      and `Post.update_comment(comment, post)` will be invoked.
 
-    * `:unique` - When true, checks if the associated entries are unique.
-      This is done by checking the primary key of the associated entries during
-      repository operations. Keep in mind this does not guarantee uniqueness at the
-      database level. For such it is preferred to set a unique index in the database.
-      For example: `create unique_index(:posts_tags, [:post_id, :tag_id])`
+    * `:join_defaults` - The same as `:defaults` but it applies to the join schema
+      instead. This option will raise if it is given and the `:join_through` value
+      is not a schema.
+
+    * `:unique` - When true, checks if the associated entries are unique
+      whenever the association is cast or changed via the parent record.
+      For instance, it would verify that a given tag cannot be attached to
+      the same post more than once. This exists mostly as a quick check
+      for user feedback, as it does not guarantee uniqueness at the database
+      level. Therefore, you should also set a unique index in the database
+      join table, such as: `create unique_index(:posts_tags, [:post_id, :tag_id])`
 
     * `:where` - A filter for the association. See "Filtering associations"
       in `has_many/3`
 
-    * `:join_through_where` - A filter for the join through association.
-      See "Filtering associations" in `has_many/3`
+    * `:join_where` - A filter for the join table. See "Filtering associations"
+      in `has_many/3`
 
   ## Removing data
 
@@ -1306,7 +1301,20 @@ defmodule Ecto.Schema do
   decoupled nature of Ecto allows us to create a "join" struct which
   `belongs_to` both sides of the many to many association.
 
-  In our example, a User has and belongs to many Organizations
+  In our example, a `User` has and belongs to many `Organization`s:
+
+      defmodule MyApp.Repo.Migrations.CreateUserOrganization do
+        use Ecto.Migration
+
+        def change do
+          create table(:users_organizations) do
+            add :user_id, references(:users)
+            add :organization_id, references(:organizations)
+
+            timestamps()
+          end
+        end
+      end
 
       defmodule UserOrganization do
         use Ecto.Schema
@@ -1350,59 +1358,11 @@ defmodule Ecto.Schema do
         {:ok, assoc} -> # Assoc was created!
         {:error, changeset} -> # Handle the error
       end
-
-  ## Using Queries as Associations
-
-  A query can also be given instead of a schema, both for the join_through and the destination.
-  Querying, joining or preloading the association will use the given query. Currently only where
-  clauses can be provided in queries. Let's see an example:
-
-      defmodule UserOrganization do
-        use Ecto.Schema
-
-        @primary_key false
-        schema "users_organizations" do
-          belongs_to :user, User
-          belongs_to :organization, Organization
-
-          field :deleted, :boolean
-          timestamps() # Added bonus, a join schema will also allow you to set timestamps
-        end
-
-        def active() do
-          from user_organization in UserOrganization,
-            where: is_nil(user_organization.deleted)
-        end
-      end
-
-      defmodule User do
-        use Ecto.Schema
-
-        schema "users" do
-          many_to_many :organizations, Organization, join_through: UserOrganization
-          field :banned, :boolean
-        end
-
-        def not_banned() do
-          from user in User,
-            where: not(user.banned)
-        end
-      end
-
-      defmodule Organization do
-        use Ecto.Schema
-
-        schema "organizations" do
-          many_to_many :users, User.not_banned(), join_through: UserOrganization.active()
-        end
-      end
-
-  Note: building the association does not consider the query filters.
-  For example, if the given query requires the active field of the associated records to be true,
-  building such association won't automatically set the active field to true.
   """
   defmacro many_to_many(name, queryable, opts \\ []) do
     queryable = expand_alias(queryable, __CALLER__)
+    opts = expand_alias_in_key(opts, :join_through, __CALLER__)
+
     quote do
       Ecto.Schema.__many_to_many__(__MODULE__, unquote(name), unquote(queryable), unquote(opts))
     end
@@ -1420,8 +1380,8 @@ defmodule Ecto.Schema do
   You must declare your `embeds_one/3` field with type `:map` at the
   database level.
 
-  The embedded may or may not have a primary key. Ecto use the primary keys
-  to detect if an embed is being updated or not. If a primary is not present,
+  The embedded may or may not have a primary key. Ecto uses the primary keys
+  to detect if an embed is being updated or not. If a primary key is not present,
   `:on_replace` should be set to either `:update` or `:delete` if there is a
   desire to either update or delete the current embed when a new one is set.
 
@@ -1491,15 +1451,18 @@ defmodule Ecto.Schema do
         end
       end
 
-  When defining an inline embed, the `:primary_key` option may be given to
-  customize the embed primary key type.
-
   Options should be passed before the `do` block like this:
 
       embeds_one :child, Child, on_replace: :delete do
         field :name, :string
         field :age,  :integer
       end
+
+  Primary keys are automatically set up for  embedded  schemas as well,
+  defaulting  to  `{:id,  :binary_id, autogenerate:   true}`. You can
+  customize it by passing a `:primary_key` option with the same arguments
+  as `@primary_key` (see the [Schema attributes](https://hexdocs.pm/ecto/Ecto.Schema.html#module-schema-attributes)
+  section for more info).
 
   Defining embedded schema in such a way will define a `Parent.Child` module
   with the appropriate struct. In order to properly cast the embedded schema.
@@ -1565,10 +1528,11 @@ defmodule Ecto.Schema do
   inside of it. Embeds have all the things regular schemas have.
 
   It is recommended to declare your `embeds_many/3` field with type `:map`
-  and a default of `"[]"` (although Ecto will also automatically translate
-  `nil` values from the database into empty lists).
+  in your migrations, instead of using `{:array, :map}`. Ecto can work with
+  both maps and arrays as the container for embeds (and in most databases
+  map are represented as JSON which allows Ecto to choose what works best).
 
-  The embedded may or may not have a primary key. Ecto use the primary keys
+  The embedded may or may not have a primary key. Ecto uses the primary keys
   to detect if an embed is being updated or not. If a primary is not present
   and you still want the list of embeds to be updated, `:on_replace` must be
   set to `:delete`, forcing all current embeds to be deleted and replaced by
@@ -1651,7 +1615,6 @@ defmodule Ecto.Schema do
       items
       # => [%Item{id: "20a97d94-f79b-4e63-a875-85deed7719b7", title: "Mujju's Soap"}]
 
-
   ## Inline embedded schema
 
   The schema module can be defined inline in the parent schema in simple
@@ -1670,8 +1633,11 @@ defmodule Ecto.Schema do
         end
       end
 
-  When defining an inline embed, the `:primary_key` option may be given to
-  customize the embed primary key type.
+  Primary keys are automatically set up for  embedded  schemas as well,
+  defaulting  to  `{:id,  :binary_id, autogenerate:   true}`. You can
+  customize it by passing a `:primary_key` option with the same arguments
+  as `@primary_key` (see the [Schema attributes](https://hexdocs.pm/ecto/Ecto.Schema.html#module-schema-attributes)
+  section for more info).
 
   Defining embedded schema in such a way will define a `Parent.Child` module
   with the appropriate struct. In order to properly cast the embedded schema.
@@ -1718,17 +1684,16 @@ defmodule Ecto.Schema do
     end
   end
 
-  @doc """
-  Internal function for integrating associations into schemas.
-
-  This function exists as an extension point for libraries to
-  add new types of associations to Ecto. For the existing APIs,
-  see `belongs_to/3`, `has_many/3`, `has_one/3` and `many_to_many/3`.
-
-  This function expects the current schema, the association cardinality,
-  the association name, the association module (that implements
-  `Ecto.Association` callbacks) and a keyword list of options.
-  """
+  # Internal function for integrating associations into schemas.
+  #
+  # This function exists as an extension point for libraries to
+  # experiment new types of associations to Ecto, although it may
+  # break at any time (as with any of the association callbacks).
+  #
+  # This function expects the current schema, the association cardinality,
+  # the association name, the association module (that implements
+  # `Ecto.Association` callbacks) and a keyword list of options.
+  @doc false
   @spec association(module, :one | :many, atom(), module, Keyword.t) :: Ecto.Association.t
   def association(schema, cardinality, name, association, opts) do
     not_loaded = %Ecto.Association.NotLoaded{
@@ -1756,15 +1721,15 @@ defmodule Ecto.Schema do
   end
 
   def __timestamps__(:utc_datetime) do
-    DateTime.from_unix!(System.system_time(:second), :second)
+    %{DateTime.utc_now() | microsecond: {0, 0}}
   end
 
   def __timestamps__(:utc_datetime_usec) do
-    DateTime.from_unix!(System.system_time(:microsecond), :microsecond)
+    DateTime.utc_now()
   end
 
   def __timestamps__(type) do
-    type.from_unix!(System.system_time(:microsecond), :microsecond)
+    type.from_unix!(System.os_time(:microsecond), :microsecond)
   end
 
   @doc false
@@ -1802,8 +1767,10 @@ defmodule Ecto.Schema do
       case gen = opts[:autogenerate] do
         {_, _, _} ->
           store_mfa_autogenerate!(mod, name, type, gen)
+
         true ->
           store_type_autogenerate!(mod, name, source || name, type, pk?)
+
         _ ->
           :ok
       end
@@ -1816,6 +1783,10 @@ defmodule Ecto.Schema do
         Module.put_attribute(mod, :ecto_primary_keys, name)
       end
 
+      if Keyword.get(opts, :load_in_query, true) do
+        Module.put_attribute(mod, :ecto_query_fields, {name, type})
+      end
+
       Module.put_attribute(mod, :ecto_fields, {name, type})
     end
   end
@@ -1824,26 +1795,24 @@ defmodule Ecto.Schema do
 
   @doc false
   def __has_many__(mod, name, queryable, opts) do
-    check_options!(opts, @valid_has_options, "has_many/3")
-
     if is_list(queryable) and Keyword.has_key?(queryable, :through) do
+      check_options!(queryable, @valid_has_options, "has_many/3")
       association(mod, :many, name, Ecto.Association.HasThrough, queryable)
     else
-      struct =
-        association(mod, :many, name, Ecto.Association.Has, [queryable: queryable] ++ opts)
+      check_options!(opts, @valid_has_options, "has_many/3")
+      struct = association(mod, :many, name, Ecto.Association.Has, [queryable: queryable] ++ opts)
       Module.put_attribute(mod, :changeset_fields, {name, {:assoc, struct}})
     end
   end
 
   @doc false
   def __has_one__(mod, name, queryable, opts) do
-    check_options!(opts, @valid_has_options, "has_one/3")
-
     if is_list(queryable) and Keyword.has_key?(queryable, :through) do
+      check_options!(queryable, @valid_has_options, "has_one/3")
       association(mod, :one, name, Ecto.Association.HasThrough, queryable)
     else
-      struct =
-        association(mod, :one, name, Ecto.Association.Has, [queryable: queryable] ++ opts)
+      check_options!(opts, @valid_has_options, "has_one/3")
+      struct = association(mod, :one, name, Ecto.Association.Has, [queryable: queryable] ++ opts)
       Module.put_attribute(mod, :changeset_fields, {name, {:assoc, struct}})
     end
   end
@@ -1873,8 +1842,7 @@ defmodule Ecto.Schema do
     Module.put_attribute(mod, :changeset_fields, {name, {:assoc, struct}})
   end
 
-  @valid_many_to_many_options [:join_through, :join_keys, :on_delete, :defaults, :on_replace,
-                               :unique, :where, :join_through_where]
+  @valid_many_to_many_options [:join_through, :join_defaults, :join_keys, :on_delete, :defaults, :on_replace, :unique, :where, :join_where]
 
   @doc false
   def __many_to_many__(mod, name, queryable, opts) do
@@ -1928,8 +1896,7 @@ defmodule Ecto.Schema do
     # If we are compiling code, we can validate associations now,
     # as the Elixir compiler will solve dependencies.
     #
-    # TODO: This is a hack, don't do this at home, it may break any time.
-    # Instead Elixir should provide a proper API to check for compilation.
+    # TODO: Use Code.can_await_module_compilation?/0 from Elixir v1.10+.
     if Process.info(self(), :error_handler) == {:error_handler, Kernel.ErrorHandler} do
       for name <- module.__schema__(:associations) do
         assoc = module.__schema__(:association, name)
@@ -2058,7 +2025,7 @@ defmodule Ecto.Schema do
       Ecto.Type.primitive?(type) ->
         type
 
-      is_atom(type) and Code.ensure_compiled?(type) and function_exported?(type, :type, 0) ->
+      is_atom(type) and Code.ensure_compiled(type) == {:module, type} and function_exported?(type, :type, 0) ->
         type
 
       is_atom(type) and function_exported?(type, :__schema__, 1) ->
@@ -2074,9 +2041,9 @@ defmodule Ecto.Schema do
   defp store_mfa_autogenerate!(mod, name, type, mfa) do
     if autogenerate_id(type) do
       raise ArgumentError, ":autogenerate with {m, f, a} not supported by ID types"
-    else
-      Module.put_attribute(mod, :ecto_autogenerate, {[name], mfa})
     end
+
+    Module.put_attribute(mod, :ecto_autogenerate, {[name], mfa})
   end
 
   defp store_type_autogenerate!(mod, name, source, type, pk?) do
@@ -2086,8 +2053,10 @@ defmodule Ecto.Schema do
           not pk? ->
             raise ArgumentError, "only primary keys allow :autogenerate for type #{inspect type}, " <>
                                  "field #{inspect name} is not a primary key"
+
           Module.get_attribute(mod, :ecto_autogenerate_id) ->
             raise ArgumentError, "only one primary key with ID type may be marked as autogenerated"
+
           true ->
             Module.put_attribute(mod, :ecto_autogenerate_id, {name, source, id})
         end
@@ -2108,11 +2077,22 @@ defmodule Ecto.Schema do
 
   defp autogenerate_id(type) do
     id = if Ecto.Type.primitive?(type), do: type, else: type.type
-    if id in [:id, :binary_id], do: type, else: nil
+
+    if id in [:id, :binary_id] do
+      type
+    end
   end
 
   defp expand_alias({:__aliases__, _, _} = ast, env),
     do: Macro.expand(ast, %{env | function: {:__schema__, 2}})
   defp expand_alias(ast, _env),
     do: ast
+
+  defp expand_alias_in_key(opts, key, env) do
+    if is_list(opts) and Keyword.has_key?(opts, key) do
+      Keyword.update!(opts, key, &expand_alias(&1, env))
+    else
+      opts
+    end
+  end
 end
